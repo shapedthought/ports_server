@@ -1,6 +1,8 @@
-import sqlite3 
+import os
+import sqlite3
+import uuid 
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, url_for
 from flask_cors import CORS
 from io import BytesIO
 import pandas as pd
@@ -72,27 +74,6 @@ def get_all_target():
 
     return jsonify(to_ports)
 
-@app.route('/generateExcel', methods=['POST'])
-def gnerate_excel():
-    data = request.get_json()
-    df = pd.DataFrame(data)
-    
-    # Create a BytesIO buffer
-    buffer = BytesIO()
-    
-    # Write the DataFrame to an Excel file in the buffer
-    df.to_excel(buffer, index=False)
-    buffer.seek(0)
-    
-    # Send the file for download
-    return send_file(
-        buffer,
-        as_attachment=True,
-        download_name='example.xlsx',
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    )
-
-
 @app.route('/ports', methods=['POST'])
 def get_ports():
     data = request.get_json()
@@ -118,5 +99,36 @@ def get_ports():
 
     return jsonify(ports_dict_list)
 
-# if __name__ == '__main__':
-#     app.run(host='0.0.0.0')
+@app.route('/generateExcelWithUrl', methods=['POST'])
+def generate_excel_with_url():
+    data = request.get_json()
+    df = pd.DataFrame(data)
+    
+    # Generate a unique filename
+    unique_filename = f"{uuid.uuid4()}.xlsx"
+    file_path = os.path.join('./reports', unique_filename)
+    
+    # Save the DataFrame to an Excel file
+    df.to_excel(file_path, index=False)
+    
+    # Generate the URL for the file
+    file_url = url_for('download_file', filename=unique_filename, _external=True)
+    
+    return jsonify({'file_url': file_url})
+
+@app.route('/download/<filename>', methods=['GET'])
+def download_file(filename):
+    file_path = os.path.join('./reports', filename)
+    
+    # Send the file for download
+    response = send_file(
+        file_path,
+        as_attachment=True,
+        download_name=filename,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    
+    # Delete the file after sending
+    os.remove(file_path)
+    
+    return response
