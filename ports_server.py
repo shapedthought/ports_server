@@ -4,7 +4,7 @@ import uuid
 
 from flask import Flask, request, jsonify, send_file, url_for
 from flask_cors import CORS
-from io import BytesIO
+import time
 import pandas as pd
 
 app = Flask(__name__)
@@ -13,6 +13,19 @@ CORS(app)
 def get_db_connection():
     conn = sqlite3.connect('allports.db')
     return conn
+
+def clean_up_old_files(directory, min_age_minutes=1):
+    current_time = time.time()
+    
+    files = os.listdir(directory)
+    if len(files) > 1:
+        for filename in files:
+            file_path = os.path.join(directory, filename)
+            if os.path.isfile(file_path):
+                file_creation_time = os.path.getctime(file_path)
+                file_age_minutes = (current_time - file_creation_time) / 60
+                if file_age_minutes > min_age_minutes:
+                    os.remove(file_path)
 
 @app.route('/', methods=['GET'])
 def get_services():
@@ -103,6 +116,8 @@ def get_ports():
 def generate_excel_with_url():
     data = request.get_json()
     df = pd.DataFrame(data)
+
+    clean_up_old_files('./reports')
     
     # Generate a unique filename
     unique_filename = f"{uuid.uuid4()}.xlsx"
@@ -130,5 +145,7 @@ def download_file(filename):
     
     # Delete the file after sending
     os.remove(file_path)
+
+
     
     return response
