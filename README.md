@@ -1,5 +1,7 @@
 # Veeam Ports Server
 
+NOTE: this is not an official Veeam tool. Errors and omisssions are accepted.
+
 This application is a very basic python flask app that fronts a SQLite databased which contains all the ports from Veeam products.
 
 The application works with the frontend application that is hosted the Veeam Architects Site https://www.veeambp.com/
@@ -63,6 +65,13 @@ If you are interested in how the data was collected check out the scrape_ports.i
 
 The put all the ports into a sqlite3 database.
 
+## Document versions
+
+All ports are up-to-date as of 03-11-24.
+
+Note that this is NOT an official Veeam tool. Errors and omissions are accepted.
+
 ## Future
 
 I would like to add another column that allows for the grouping of certain elements what would normally be implemented together. This will require some changes on the frontend as well.
+
