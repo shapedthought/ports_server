@@ -12,6 +12,11 @@ If you have any suggestions for improvements please send open an issue.
 
 See the frontend project here: https://github.com/shapedthought/portsApp
 
+## Last update
+
+- Added Agent Management
+- Last run on 05/11/24
+
 ## How to run
 
 You will need all the packages installed
