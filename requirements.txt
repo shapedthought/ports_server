@@ -3,3 +3,4 @@ Flask-Cors==5.0.0
 gunicorn==23.0.0
 pandas==2.2.3
 openpyxl==3.0.9
+html5lib==1.1

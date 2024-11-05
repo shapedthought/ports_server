@@ -15,7 +15,13 @@ See the frontend project here: https://github.com/shapedthought/portsApp
 ## Last update
 
 - Added Agent Management
+- Added some of the explorers
 - Last run on 05/11/24
+
+Issues with:
+- Mongo Explorer
+- VSPC
+- VONE
 
 ## How to run
 
