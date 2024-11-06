@@ -12,16 +12,28 @@ If you have any suggestions for improvements please send open an issue.
 
 See the frontend project here: https://github.com/shapedthought/portsApp
 
-## Last update
+## Current versions
 
-- Added Agent Management
-- Added some of the explorers
-- Last run on 05/11/24
+Last updated: 06-11-24
 
-Issues with:
-- Mongo Explorer
-- VSPC
-- VONE
+| Product              | Version |
+| -------------------- | ------- |
+| VBR VMware & Hyper-V | 12.2    |
+| Agent Management     | 12.2    |
+| Explorers            | 12.2    |
+| VCC                  | 12.2    |
+| VONE                 | 12.2    |
+| VSPC                 | 8.1     |
+| VRO                  | 7       |
+| VB365                | 8       |
+| AHV                  | 6       |
+| OLVM / RHV           | 5       |
+| Proxmox              | 1       |
+| VBAWS                | 8       |
+| VBAzure              | 7       |
+| VBGCP                | 5       |
+| Agent for Windows    | 6       |
+| Agent for Linux      | 6       |
 
 ## How to run
 
@@ -46,7 +58,7 @@ The database can be found in allports.db
 Schema
 
 - from_port > this is actually the source service
-- to_port > target service 
+- to_port > target service
 - protocol > protocol used
 - port > port(s)
 - Description > The description
@@ -72,7 +84,7 @@ docker run --rm -d -p 8001:8001 portServer:0.1
 
 ## Scraping
 
-If you are interested in how the data was collected check out the scrape_ports.ipynb where I used Python Pandas to quickly exact the data from each site. 
+If you are interested in how the data was collected check out the scrape_ports.ipynb where I used Python Pandas to quickly exact the data from each site.
 
 The put all the ports into a sqlite3 database.
 
@@ -85,4 +97,3 @@ Note that this is NOT an official Veeam tool. Errors and omissions are accepted.
 ## Future
 
 I would like to add another column that allows for the grouping of certain elements what would normally be implemented together. This will require some changes on the frontend as well.
-
