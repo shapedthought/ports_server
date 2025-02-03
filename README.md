@@ -14,24 +14,24 @@ See the frontend project here: https://github.com/shapedthought/portsApp
 
 ## Current versions
 
-Last updated: 06-11-24
+Last updated: 25-02-2025
 
 | Product              | Version |
 | -------------------- | ------- |
-| VBR VMware & Hyper-V | 12.2    |
-| Agent Management     | 12.2    |
-| Explorers            | 12.2    |
-| VCC                  | 12.2    |
-| VONE                 | 12.2    |
+| VBR VMware & Hyper-V | 12.3    |
+| Agent Management     | 12.3    |
+| Explorers            | 12.3    |
+| VCC                  | 12.3    |
+| VONE                 | 12.3    |
 | VSPC                 | 8.1     |
 | VRO                  | 7       |
 | VB365                | 8       |
-| AHV                  | 6       |
-| OLVM / RHV           | 5       |
+| AHV                  | 7       |
+| OLVM / RHV           | 6       |
 | Proxmox              | 1       |
 | VBAWS                | 8       |
 | VBAzure              | 7       |
-| VBGCP                | 5       |
+| VBGCP                | 6       |
 | Agent for Windows    | 6       |
 | Agent for Linux      | 6       |
 
