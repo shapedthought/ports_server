@@ -90,7 +90,7 @@ The put all the ports into a sqlite3 database.
 
 ## Document versions
 
-All ports are up-to-date as of 03-11-24.
+All ports are up-to-date as of 03-02-25, includes all ports for v12.3 including Veeam Threat Hunter.
 
 Note that this is NOT an official Veeam tool. Errors and omissions are accepted.
 
