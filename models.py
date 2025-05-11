@@ -58,6 +58,7 @@ class SourceTargetRequest(BaseModel):
 
     from_port: str = Field(..., alias="fromPort")
     product_name: str = Field(..., alias="productName")
+    section: str = Field(..., alias="section")
 
     class Config:
         populate_by_name = True

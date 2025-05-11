@@ -1,0 +1,98 @@
+[
+  {
+    "url": "https://helpcenter.veeam.com/docs/vbo365/guide/vbo_used_ports.html",
+    "product": "VB365"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/backup/vsphere/used_ports.html",
+    "product": "VBR"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/backup/hyperv/used_ports.html",
+    "product": "VBR Hyper-V"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/vbahv/userguide/used_ports.html",
+    "product": "AHV"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/vbrhv/userguide/used_ports.html",
+    "product": "OLVM / RHV"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/vbproxmoxve/userguide/used_ports.html",
+    "product": "Proxmox"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/backup/cloud/ports.html",
+    "product": "VCC"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/vro/userguide/ports.html",
+    "product": "VRO"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/vbaws/guide/ports.html",
+    "product": "VBAWS"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/vbazure/guide/ports.html",
+    "product": "VBAZ"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/vbgc/guide/ports.html",
+    "product": "VBGCP"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/agentforwindows/userguide/ports.html",
+    "product": "Windows"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/agentforlinux/userguide/used_ports.html",
+    "product": "Linux"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/backup/agents/used_ports.html",
+    "product": "Agent Management"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/one/deployment/ports.html",
+    "product": "VONE"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/vac/deployment/ports.html",
+    "product": "VSPC"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/backup/explorers/vead_ports.html",
+    "product": "Explorer AD"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/backup/explorers/vesql_used_ports.html",
+    "product": "Explorer SQL"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/backup/explorers/veo_used_ports.html",
+    "product": "Explorer Oracle"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/backup/explorers/vep_used_ports.html",
+    "product": "Explorer Postgres"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/backup/explorers/vemdb_used_ports.html",
+    "product": "Explorer SAP HANA"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/backup/explorers/vemdb_used_ports.html",
+    "product": "Explorer Mongo"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/backup/explorers/vex_ports.html",
+    "product": "Explorer Exchange"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/docs/backup/explorers/vesp_ports.html",
+    "product": "Explorer SharePoint"
+  }
+]

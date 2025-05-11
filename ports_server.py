@@ -220,15 +220,17 @@ def get_all_target():
     # Use validated data
     from_port = validated_data.from_port
     product_name = validated_data.product_name
+    section = validated_data.section
 
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT DISTINCT * FROM all_ports WHERE from_port=? AND product=?",
+            "SELECT DISTINCT * FROM all_ports WHERE from_port=? AND product=? AND section=?",
             (
                 from_port,
                 product_name,
+                section,
             ),
         )
         to_ports = cursor.fetchall()
