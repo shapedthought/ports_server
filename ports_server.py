@@ -1,27 +1,35 @@
 import os
-import sqlite3
 import uuid
-
-from flask import Flask, request, jsonify, send_file, url_for
-from flask_cors import CORS
 import time
 import pandas as pd
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import create_engine, MetaData, Table, select, distinct
 
-app = Flask(__name__)
-CORS(app)
+# from pydantic import BaseModel
+from typing import List
+from models import PortResponse  # Your existing Pydantic model
 
+app = FastAPI()
 
-def get_db_connection():
-    # Create a connection to the SQLite database
-    conn = sqlite3.connect("allports.db")
-    return conn
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=False,  # Disables credential sharing (default)
+    allow_methods=["*"],  # Allows all HTTP methods
+    allow_headers=["*"],  # Allows all headers
+)
+
+# SQLAlchemy setup
+engine = create_engine("sqlite:///allports_updated.db", future=True)
+metadata = MetaData()
+all_ports = Table("all_ports", metadata, autoload_with=engine)
 
 
 def clean_up_old_files(directory, min_age_minutes=1):
-    # Remove files older than min_age_minutes from the directory
-    # Stops the directory from getting filled with old files
     current_time = time.time()
-
     files = os.listdir(directory)
     if len(files) > 1:
         for filename in files:
@@ -33,170 +41,113 @@ def clean_up_old_files(directory, min_age_minutes=1):
                     os.remove(file_path)
 
 
-@app.route("/health", methods=["GET"])
-def health_check():
-    # Simple health check endpoint
-    return jsonify({"status": "healthy"}), 200
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
 
 
-@app.route("/", methods=["GET"])
-def get_services():
-    # Get all the distinct services from the database
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT Product FROM all_ports")
-    services = cursor.fetchall()
-    conn.close()
-    # Flatten the list of tuples
-    flat_services = [item for sublist in services for item in sublist]
-    return jsonify(flat_services)
+@app.get("/")
+async def get_services():
+    stmt = select(distinct(all_ports.c.product))
+    with engine.connect() as conn:
+        result = conn.execute(stmt)
+        services = [row[0] for row in result]
+    return services
 
 
-@app.route("/source", methods=["POST"])
-def get_product():
-    # Get all the distinct source services for a given product
-    data = request.get_json()
-    print(data)
+@app.post("/source")
+async def get_product(request: Request):
+    data = await request.json()
     product_name = data["productName"]
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT DISTINCT from_port FROM all_ports WHERE Product=?", (product_name,)
+    stmt = select(distinct(all_ports.c.sourceService)).where(
+        all_ports.c.product == product_name
     )
-    product = cursor.fetchall()
-    conn.close()
-    # Flatten the list of tuples
-    flat_product = [item for sublist in product for item in sublist]
-    return jsonify(flat_product)
+    with engine.connect() as conn:
+        result = conn.execute(stmt)
+        products = [row[0] for row in result]
+    return products
 
 
-@app.route("/target", methods=["POST"])
-def get_target():
-    # Get all the distinct target services for a given product and source service
-    data = request.get_json()
-    from_port = data["fromPort"]
+@app.post("/target")
+async def get_target(request: Request):
+    data = await request.json()
+    source_service = data["sourceService"]
     product_name = data["productName"]
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT DISTINCT to_port FROM all_ports " "WHERE from_port=? AND Product=?",
-        (
-            from_port,
-            product_name,
-        ),
+    stmt = select(distinct(all_ports.c.targetService)).where(
+        (all_ports.c.sourceService == source_service)
+        & (all_ports.c.product == product_name)
     )
-    to_ports = cursor.fetchall()
-    conn.close()
-    # Flatten the list of tuples
-    to_ports = [item for sublist in to_ports for item in sublist]
-    return jsonify(to_ports)
+    with engine.connect() as conn:
+        result = conn.execute(stmt)
+        to_ports = [row[0] for row in result]
+    return to_ports
 
 
-@app.route("/allTarget", methods=["POST"])
-def get_all_target():
-    # Get all the target services for a given product and source service
-    data = request.get_json()
-    from_port = data["fromPort"]
+@app.post("/allTarget", response_model=List[PortResponse])
+async def get_all_target(request: Request):
+    data = await request.json()
+    source_service = data["sourceService"]
     product_name = data["productName"]
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT * FROM all_ports " "WHERE from_port=? AND Product=?",
-        (
-            from_port,
-            product_name,
-        ),
+    stmt = (
+        select(all_ports)
+        .where(
+            (all_ports.c.sourceService == source_service)
+            & (all_ports.c.product == product_name)
+        )
+        .order_by(
+            all_ports.c.subheading,
+            all_ports.c.subheadingL2,
+            all_ports.c.subheadingL3,
+            all_ports.c.targetService,
+        )
     )
-    to_ports = cursor.fetchall()
-    conn.close()
-
-    # Convert the first item in the cursor.description tuple to a list of column names
-    column_names = [desc[0] for desc in cursor.description]
-
-    # Convert the list of tuples to a list of dictionaries
-    to_ports = [dict(zip(column_names, port)) for port in to_ports]
-
-    # Convert from_port and to_port keys to camelCase
-    for port_dict in to_ports:
-        port_dict["description"] = port_dict.pop("Description")
-        port_dict["product"] = port_dict.pop("Product")
-        port_dict["fromPort"] = port_dict.pop("from_port")
-        port_dict["toPort"] = port_dict.pop("to_port")
-
-    return jsonify(to_ports)
+    df = pd.read_sql(stmt, engine)
+    records = df.to_dict("records")
+    response_models = [PortResponse(**record) for record in records]
+    return response_models
 
 
-@app.route("/ports", methods=["POST"])
-def get_ports():
-    data = request.get_json()
-    from_port = data["fromPort"]
-    to_port = data["toPort"]
+@app.post("/ports", response_model=List[PortResponse])
+async def get_ports(request: Request):
+    data = await request.json()
+    source_service = data["sourceService"]
+    target_service = data["targetService"]
     product_name = data["productName"]
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT * FROM all_ports " "WHERE from_port=? AND to_port=? AND Product=?",
-        (
-            from_port,
-            to_port,
-            product_name,
-        ),
+    stmt = select(all_ports).where(
+        (all_ports.c.sourceService == source_service)
+        & (all_ports.c.targetService == target_service)
+        & (all_ports.c.product == product_name)
     )
-    ports = cursor.fetchall()
-    print(ports)
-    conn.close()
-
-    # Convert the first item in the cursor.description tuple to a list of column names
-    column_names = [desc[0] for desc in cursor.description]
-
-    # Convert the list of tuples to a list of dictionaries
-    ports_dict_list = [dict(zip(column_names, port)) for port in ports]
-
-    # Convert from_port and to_port keys to camelCase
-    for port_dict in ports_dict_list:
-        port_dict["description"] = port_dict.pop("Description")
-        port_dict["product"] = port_dict.pop("Product")
-        port_dict["fromPort"] = port_dict.pop("from_port")
-        port_dict["toPort"] = port_dict.pop("to_port")
-
-    return jsonify(ports_dict_list)
+    df = pd.read_sql(stmt, engine)
+    records = df.to_dict("records")
+    response_models = [PortResponse(**record) for record in records]
+    return response_models
 
 
-@app.route("/generateExcelWithUrl", methods=["POST"])
-def generate_excel_with_url():
-    data = request.get_json()
+@app.post("/generateExcelWithUrl")
+async def generate_excel_with_url(data: List[dict]):
     df = pd.DataFrame(data)
-
     clean_up_old_files("./reports")
-
-    # Generate a unique filename
     unique_filename = f"{uuid.uuid4()}.xlsx"
     file_path = os.path.join("./reports", unique_filename)
-
-    # Save the DataFrame to an Excel file
     df.to_excel(file_path, index=False)
-
-    # Generate the URL for the file
-    file_url = url_for("download_file", filename=unique_filename, _external=True)
-
-    return jsonify({"file_url": file_url})
+    file_url = f"/download/{unique_filename}"
+    return {"file_url": file_url}
 
 
-@app.route("/download/<filename>", methods=["GET"])
-def download_file(filename):
+@app.get("/download/{filename}")
+async def download_file(filename: str):
     file_path = os.path.join("./reports", filename)
-
-    # Send the file for download
-    response = send_file(
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    response = FileResponse(
         file_path,
-        as_attachment=True,
-        download_name=filename,
-        mimetype=(
-            "application/vnd.openxmlformats-officedocument." "spreadsheetml.sheet"
-        ),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=filename,
     )
-
-    # Delete the file after sending
-    os.remove(file_path)
-
+    # Optionally, delete the file after sending (uncomment if desired)
+    # os.remove(file_path)
     return response
+
+
+# To run: uvicorn ports_server_fastapi:app --reload

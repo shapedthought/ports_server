@@ -8,6 +8,6 @@ RUN mkdir /app/reports
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-EXPOSE 8000
+EXPOSE 8001
 
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:8000", "ports_server:app"]
+CMD ["uvicorn", "ports_server:app", "--host", "0.0.0.0", "--port", "8001"]

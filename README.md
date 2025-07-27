@@ -1,12 +1,12 @@
 # Veeam Ports Server
 
-NOTE: this is not an official Veeam tool. Errors and omisssions are accepted.
+NOTE: this is not an official Veeam tool. Errors and omissions are accepted.
 
-This application is a very basic python flask app that fronts a SQLite databased which contains all the ports from Veeam products.
+This application is a FastAPI app that fronts a SQLite database which contains all the ports from Veeam products.
 
 The application works with the frontend application that is hosted the Veeam Architects Site https://www.veeambp.com/
 
-We deciceded to open source both parts of this project so everyone can benefit from it and help improve it.
+We decided to open source both parts of this project so everyone can benefit from it and help improve it.
 
 If you have any suggestions for improvements please send open an issue.
 
@@ -46,7 +46,7 @@ pip install -r requirements.txt
 Then run the following:
 
 ```
-gunicorn -w 4 -b 0.0.0.0:8001 ports_server:app
+uvicorn ports_server:app --reload --port 8001
 ```
 
 You can change the port to whatever you want but the Angular front-end works on 8001.
@@ -57,16 +57,21 @@ The database can be found in allports.db
 
 Schema
 
-- from_port > this is actually the source service
-- to_port > target service
+- fromService > this is actually the source service
+- toService > target service
 - protocol > protocol used
 - port > port(s)
-- Description > The description
-- Product > The associated Veeam product e.g. VBR, VB365, VBAWS
+- description > The description
+- subheading > The subheading in the Help Documentation
+- subheadingL2 > The subheading level 2 in the Help Documentation
+- subheadingL3 > The subheading level 3 in the Help Documentation
+- product > The associated Veeam product e.g. VBR, VB365, VBAWS
 
 All columns are TEXT as there really isn't any need for number or float values.
 
-Also note that I did very little in the way of cleaning the database so there are some unrully entries which either I or the community can remove and submit a PR.
+This version of the database has been updated to include subheadings and subheadings level 2 and 3. This allows for better grouping of ports in the frontend application.
+
+Also note that I did very little in the way of cleaning the database so there are some unruly entries which either I or the community can remove and submit a PR.
 
 ## Docker
 
