@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, MetaData, Table, select, distinct
 
 # from pydantic import BaseModel
 from typing import List
-from models import PortResponse  # Your existing Pydantic model
+from models import PortResponse, TargetRequest, PortRequest, SourceRequest
 
 app = FastAPI()
 
@@ -56,9 +56,8 @@ async def get_services():
 
 
 @app.post("/source")
-async def get_product(request: Request):
-    data = await request.json()
-    product_name = data["productName"]
+async def get_product(request: SourceRequest):
+    product_name = request.productName
     stmt = select(distinct(all_ports.c.sourceService)).where(
         all_ports.c.product == product_name
     )
@@ -69,10 +68,9 @@ async def get_product(request: Request):
 
 
 @app.post("/target")
-async def get_target(request: Request):
-    data = await request.json()
-    source_service = data["sourceService"]
-    product_name = data["productName"]
+async def get_target(request: TargetRequest):
+    source_service = request.sourceService
+    product_name = request.productName
     stmt = select(distinct(all_ports.c.targetService)).where(
         (all_ports.c.sourceService == source_service)
         & (all_ports.c.product == product_name)
@@ -84,10 +82,9 @@ async def get_target(request: Request):
 
 
 @app.post("/allTarget", response_model=List[PortResponse])
-async def get_all_target(request: Request):
-    data = await request.json()
-    source_service = data["sourceService"]
-    product_name = data["productName"]
+async def get_all_target(request: TargetRequest):
+    source_service = request.sourceService
+    product_name = request.productName
     stmt = (
         select(all_ports)
         .where(
@@ -108,11 +105,10 @@ async def get_all_target(request: Request):
 
 
 @app.post("/ports", response_model=List[PortResponse])
-async def get_ports(request: Request):
-    data = await request.json()
-    source_service = data["sourceService"]
-    target_service = data["targetService"]
-    product_name = data["productName"]
+async def get_ports(request: PortRequest):
+    source_service = request.sourceService
+    target_service = request.targetService
+    product_name = request.productName
     stmt = select(all_ports).where(
         (all_ports.c.sourceService == source_service)
         & (all_ports.c.targetService == target_service)
@@ -145,8 +141,7 @@ async def download_file(filename: str):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=filename,
     )
-    # Optionally, delete the file after sending (uncomment if desired)
-    # os.remove(file_path)
+    os.remove(file_path)
     return response
 
 

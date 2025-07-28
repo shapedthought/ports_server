@@ -11,3 +11,18 @@ class PortResponse(BaseModel):
     subheadingL3: str = Field(..., alias="subheadingL3")
     port: str = Field(..., alias="port")
     protocol: str = Field(..., alias="protocol")
+
+
+class TargetRequest(BaseModel):
+    sourceService: str
+    productName: str
+
+
+class PortRequest(BaseModel):
+    productName: str
+    sourceService: str
+    targetService: str
+
+
+class SourceRequest(BaseModel):
+    productName: str

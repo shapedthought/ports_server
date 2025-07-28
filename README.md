@@ -14,7 +14,7 @@ See the frontend project here: https://github.com/shapedthought/portsApp
 
 ## Current versions
 
-Last updated: 25-02-2025
+Last updated: 27-07-2025
 
 | Product              | Version |
 | -------------------- | ------- |
@@ -71,7 +71,7 @@ All columns are TEXT as there really isn't any need for number or float values.
 
 This version of the database has been updated to include subheadings and subheadings level 2 and 3. This allows for better grouping of ports in the frontend application.
 
-Also note that I did very little in the way of cleaning the database so there are some unruly entries which either I or the community can remove and submit a PR.
+Check the scrape_ports_updated.ipynb for how the data was collected and put into the database.
 
 ## Docker
 
@@ -95,7 +95,7 @@ The put all the ports into a sqlite3 database.
 
 ## Document versions
 
-All ports are up-to-date as of 03-02-25, includes all ports for v12.3 including Veeam Threat Hunter.
+All ports are up-to-date as of 27-07-2025, includes all ports for v12.3 including Veeam Threat Hunter.
 
 Note that this is NOT an official Veeam tool. Errors and omissions are accepted.
 
