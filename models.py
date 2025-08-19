@@ -16,6 +16,7 @@ class PortResponse(BaseModel):
 class TargetRequest(BaseModel):
     sourceService: str
     productName: str
+    subheading: str
 
 
 class PortRequest(BaseModel):
@@ -26,3 +27,9 @@ class PortRequest(BaseModel):
 
 class SourceRequest(BaseModel):
     productName: str
+
+
+class SourceResponse(BaseModel):
+    product: str
+    subheading: str
+    sourceService: str

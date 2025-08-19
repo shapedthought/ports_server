@@ -2,14 +2,20 @@ import os
 import uuid
 import time
 import pandas as pd
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, MetaData, Table, select, distinct
 
 # from pydantic import BaseModel
 from typing import List
-from models import PortResponse, TargetRequest, PortRequest, SourceRequest
+from models import (
+    PortResponse,
+    TargetRequest,
+    PortRequest,
+    SourceRequest,
+    SourceResponse,
+)
 
 app = FastAPI()
 
@@ -47,7 +53,7 @@ async def health_check():
 
 
 @app.get("/")
-async def get_services():
+async def get_services() -> List[str]:
     stmt = select(distinct(all_ports.c.product))
     with engine.connect() as conn:
         result = conn.execute(stmt)
@@ -65,6 +71,30 @@ async def get_product(request: SourceRequest):
         result = conn.execute(stmt)
         products = [row[0] for row in result]
     return products
+
+
+@app.post("/sourceDetails", response_model=List[SourceResponse])
+async def get_source_details(request: SourceRequest):
+    product_name = request.productName
+    stmt = (
+        select(all_ports.c.product, all_ports.c.sourceService, all_ports.c.subheading)
+        .distinct()
+        .where(all_ports.c.product == product_name)
+        .order_by(all_ports.c.subheading, all_ports.c.sourceService)
+    )
+    df = pd.read_sql(stmt, engine)
+    records = df.to_dict("records")
+    responses: SourceResponse = []
+    for i in records:
+        responses.append(
+            SourceResponse(
+                product=i["product"],
+                sourceService=i["sourceService"],
+                subheading=i["subheading"],
+            )
+        )
+
+    return responses
 
 
 @app.post("/target")
@@ -85,11 +115,13 @@ async def get_target(request: TargetRequest):
 async def get_all_target(request: TargetRequest):
     source_service = request.sourceService
     product_name = request.productName
+    subheading = request.subheading
     stmt = (
         select(all_ports)
         .where(
             (all_ports.c.sourceService == source_service)
             & (all_ports.c.product == product_name)
+            & (all_ports.c.subheading == subheading)
         )
         .order_by(
             all_ports.c.subheading,
