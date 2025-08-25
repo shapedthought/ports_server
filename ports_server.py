@@ -173,7 +173,7 @@ async def download_file(filename: str):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=filename,
     )
-    os.remove(file_path)
+
     return response
 
 
