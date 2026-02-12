@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
 DB_PATH = os.environ.get("DB_PATH", "allports_updated.db")
-CONFIG_PATH = "configuration.json"
+CONFIG_PATH = os.environ.get("CONFIG_PATH", "configuration.json")
 
 # Column rename mapping: scraped HTML column names → DB column names
 COLUMN_RENAME = {

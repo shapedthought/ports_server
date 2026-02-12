@@ -15,16 +15,24 @@ spec:
         spec:
           containers:
           - name: scraper
-            image: txtxx56/ports_server:0.9
+            image: txtxx56/ports_server:0.91
             command: ["python", "scrape_ports.py"]
             env:
             - name: DB_PATH
               value: "/data/allports_updated.db"
+            - name: CONFIG_PATH
+              value: "/config/configuration.json"
             volumeMounts:
             - name: db-storage
               mountPath: /data
+            - name: scraper-config
+              mountPath: /config
+              readOnly: true
           restartPolicy: OnFailure
           volumes:
           - name: db-storage
             persistentVolumeClaim:
               claimName: ports-db-pvc
+          - name: scraper-config
+            configMap:
+              name: scraper-config
