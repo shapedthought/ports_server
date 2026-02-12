@@ -18,9 +18,9 @@ Last updated: 11-02-2026
 
 | Product              | Version |
 | -------------------- | ------- |
-| VBR VMware           | 13      |
+| VBR VMware/Hyper-V   | 13      |
 | VBR VMware (v12.3)   | 12.3    |
-| VBR Hyper-V          | 13      |
+| VBR Hyper-V          | 12.3    |
 | Agent Management     | 13      |
 | Explorers            | 13      |
 | VCC                  | 13      |
