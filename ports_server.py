@@ -29,7 +29,8 @@ app.add_middleware(
 )
 
 # SQLAlchemy setup
-engine = create_engine("sqlite:///allports_updated.db", future=True)
+db_path = os.environ.get("DB_PATH", "allports_updated.db")
+engine = create_engine(f"sqlite:///{db_path}", future=True)
 metadata = MetaData()
 all_ports = Table("all_ports", metadata, autoload_with=engine)
 
@@ -177,4 +178,4 @@ async def download_file(filename: str):
     return response
 
 
-# To run: uvicorn ports_server_fastapi:app --reload
+os.makedirs("./reports", exist_ok=True)

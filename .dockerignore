@@ -1,7 +1,13 @@
 Dockerfile
+.dockerignore
 README.md
+CLAUDE.md
+.git
+.gitignore
 .ruff_cache
-virt
-scrape_ports_updated.ipynb
-configuration.json 
+.claude
 __pycache__
+virt
+k3s
+*.ipynb
+*.parquet

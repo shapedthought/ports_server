@@ -1,0 +1,13 @@
+# ports-backend-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: ports-backend-service
+spec:
+  selector:
+    app: ports-backend
+  ports:
+    - protocol: TCP
+      port: 8001
+      targetPort: 8001
+  type: ClusterIP
