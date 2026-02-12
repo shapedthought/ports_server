@@ -1,0 +1,39 @@
+# ports-backend-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ports-backend-deployment
+  labels:
+    app: ports-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ports-backend
+  template:
+    metadata:
+      labels:
+        app: ports-backend
+    spec:
+      containers:
+      - name: ports-backend
+        image: txtxx56/ports_server:0.9
+        ports:
+        - containerPort: 8001
+        env:
+        - name: DB_PATH
+          value: "/data/allports_updated.db"
+        volumeMounts:
+        - name: db-storage
+          mountPath: /data
+        # resources:
+        #   requests:
+        #     memory: "128Mi"
+        #     cpu: "100m"
+        #   limits:
+        #     memory: "256Mi"
+        #     cpu: "200m"
+      volumes:
+      - name: db-storage
+        persistentVolumeClaim:
+          claimName: ports-db-pvc

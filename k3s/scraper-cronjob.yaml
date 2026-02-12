@@ -1,0 +1,30 @@
+# scraper-cronjob.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ports-scraper
+spec:
+  schedule: "0 6 * * 1"  # Every Monday at 06:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          containers:
+          - name: scraper
+            image: txtxx56/ports_server:0.9
+            command: ["python", "scrape_ports.py"]
+            env:
+            - name: DB_PATH
+              value: "/data/allports_updated.db"
+            volumeMounts:
+            - name: db-storage
+              mountPath: /data
+          restartPolicy: OnFailure
+          volumes:
+          - name: db-storage
+            persistentVolumeClaim:
+              claimName: ports-db-pvc

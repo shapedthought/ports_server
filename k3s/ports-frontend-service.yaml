@@ -1,0 +1,13 @@
+# ports-frontend-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: ports-frontend-service 
+spec:
+  selector:
+    app: ports-frontend
+  ports:
+    - protocol: TCP
+      port: 80 
+      targetPort: 80 
+  type: ClusterIP 

@@ -4,12 +4,16 @@
     "product": "VB365"
   },
   {
-    "url": "https://helpcenter.veeam.com/docs/backup/vsphere/used_ports.html",
-    "product": "VBR"
+    "url": "https://helpcenter.veeam.com/docs/vbr/userguide/used_ports.html?ver=13",
+    "product": "VBR v13"
   },
   {
-    "url": "https://helpcenter.veeam.com/docs/backup/hyperv/used_ports.html",
-    "product": "VBR Hyper-V"
+    "url": "https://helpcenter.veeam.com/archive/backup/120/vsphere/used_ports.html",
+    "product": "VBR VMware v12.3"
+  },
+  {
+    "url": "https://helpcenter.veeam.com/archive/backup/120/hyperv/used_ports.html",
+    "product": "VBR Hyper-V v12.3"
   },
   {
     "url": "https://helpcenter.veeam.com/docs/vbahv/userguide/used_ports.html",

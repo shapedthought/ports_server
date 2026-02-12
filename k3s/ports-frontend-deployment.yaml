@@ -1,0 +1,29 @@
+# ports-frontend-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ports-frontend-deployment
+  labels:
+    app: ports-frontend
+spec:
+  replicas: 1 
+  selector:
+    matchLabels:
+      app: ports-frontend
+  template:
+    metadata:
+      labels:
+        app: ports-frontend
+    spec:
+      containers:
+      - name: ports-frontend
+        image: txtxx56/portsapp:0.9
+        ports:
+        - containerPort: 80 
+        # resources: 
+        #   requests:
+        #     memory: "128Mi"
+        #     cpu: "100m"
+        #   limits:
+        #     memory: "256Mi"
+        #     cpu: "200m"
