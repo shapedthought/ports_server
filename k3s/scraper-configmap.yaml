@@ -93,7 +93,7 @@ data:
         "product": "Explorer Postgres"
       },
       {
-        "url": "https://helpcenter.veeam.com/docs/backup/explorers/vemdb_used_ports.html",
+        "url": "https://helpcenter.veeam.com/docs/backup/explorers/vehana_used_ports.html",
         "product": "Explorer SAP HANA"
       },
       {

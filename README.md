@@ -87,13 +87,13 @@ All columns are TEXT. The subheading hierarchy allows grouping ports in the fron
 Build for x86 from Apple Silicon:
 
 ```
-docker buildx build --platform linux/amd64 -t txtxx56/ports_server:0.9 --push .
+docker buildx build --platform linux/amd64 -t txtxx56/ports_server:0.91 --push .
 ```
 
 Run locally:
 
 ```
-docker run --rm -d -p 8001:8001 txtxx56/ports_server:0.9
+docker run --rm -d -p 8001:8001 txtxx56/ports_server:0.91
 ```
 
 ## Deployment
