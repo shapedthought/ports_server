@@ -77,6 +77,10 @@ def scrape_product(product: str, url: str) -> list[pd.DataFrame]:
     current_subheading_l3 = ""
     product_dfs = []
 
+    if soup.body is None:
+        log.warning("No <body> tag found while scraping product '%s' from %s", product, url)
+        return product_dfs
+
     for element in soup.body.find_all(["span", "table"]):
         if element.name == "span" and "class" in element.attrs:
             classes = element.get("class", [])

@@ -25,7 +25,7 @@ The `DB_PATH` env var overrides the default DB location (used in k3s to point at
 
 ### Docker (cross-compile for x86 from Apple Silicon)
 ```bash
-docker buildx build --platform linux/amd64 -t txtxx56/ports_server:0.9 --push .
+docker buildx build --platform linux/amd64 -t txtxx56/ports_server:0.91 --push .
 ```
 
 The app runs on port **8001**.
