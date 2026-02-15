@@ -5,7 +5,7 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, MetaData, Table, select, distinct
+from sqlalchemy import create_engine, MetaData, Table, select, distinct, or_
 
 # from pydantic import BaseModel
 from typing import List
@@ -151,6 +151,60 @@ async def get_ports(request: PortRequest):
     records = df.to_dict("records")
     response_models = [PortResponse(**record) for record in records]
     return response_models
+
+
+@app.get("/products/{name}/ports", response_model=List[PortResponse])
+async def get_product_ports(name: str):
+    stmt = (
+        select(all_ports)
+        .where(all_ports.c.product == name)
+        .order_by(
+            all_ports.c.subheading,
+            all_ports.c.subheadingL2,
+            all_ports.c.subheadingL3,
+        )
+    )
+    df = pd.read_sql(stmt, engine)
+    records = df.to_dict("records")
+    return [PortResponse(**record) for record in records]
+
+
+@app.get("/products/{name}/subheadings")
+async def get_product_subheadings(name: str) -> List[str]:
+    stmt = (
+        select(distinct(all_ports.c.subheading))
+        .where(all_ports.c.product == name)
+        .order_by(all_ports.c.subheading)
+    )
+    with engine.connect() as conn:
+        result = conn.execute(stmt)
+        return [row[0] for row in result]
+
+
+@app.get("/search", response_model=List[PortResponse])
+async def search_ports(q: str):
+    pattern = f"%{q}%"
+    stmt = select(all_ports).where(
+        or_(
+            all_ports.c.sourceService.like(pattern),
+            all_ports.c.targetService.like(pattern),
+            all_ports.c.description.like(pattern),
+            all_ports.c.port.like(pattern),
+            all_ports.c.subheading.like(pattern),
+            all_ports.c.product.like(pattern),
+        )
+    )
+    df = pd.read_sql(stmt, engine)
+    records = df.to_dict("records")
+    return [PortResponse(**record) for record in records]
+
+
+@app.get("/search/port/{port}", response_model=List[PortResponse])
+async def search_by_port(port: str):
+    stmt = select(all_ports).where(all_ports.c.port.like(f"%{port}%"))
+    df = pd.read_sql(stmt, engine)
+    records = df.to_dict("records")
+    return [PortResponse(**record) for record in records]
 
 
 @app.post("/generateExcelWithUrl")
