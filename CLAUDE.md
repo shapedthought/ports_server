@@ -79,5 +79,9 @@ Internet → magicports.veeambp.com (TLS via Let's Encrypt + cert-manager)
 | POST | `/target` | Target services for a source/product |
 | POST | `/allTarget` | All ports for source/product/subheading |
 | POST | `/ports` | Ports for a specific source/target/product |
+| GET | `/products/{name}/ports` | All ports for a product |
+| GET | `/products/{name}/subheadings` | Distinct subheadings for a product |
+| GET | `/search?q=` | Free-text search across all fields |
+| GET | `/search/port/{port}` | Find entries by port number |
 | POST | `/generateExcelWithUrl` | Generate Excel file from port data |
 | GET | `/download/{filename}` | Download generated Excel file |
