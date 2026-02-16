@@ -118,6 +118,44 @@ class TopologyResponse(BaseModel):
     metadata: TopologyMetadata
 
 
+# --- App import models (nested topology for frontend) ---
+
+
+class AppImportMappedPort(BaseModel):
+    sourceServerId: str
+    sourceServerName: str
+    targetServerName: str
+    sourceService: str
+    targetService: str
+    description: str
+    product: str
+    port: str
+    protocol: str
+
+
+class AppImportPortByProtocol(BaseModel):
+    index: int
+    serverName: str
+    service: str
+    protocol: str
+    port: str
+
+
+class AppImportServer(BaseModel):
+    id: str
+    sourceServer: str
+    totalMappedPorts: int
+    totalMappedInboundPorts: int
+    totalMappedServers: int
+    mappedPorts: list[AppImportMappedPort]
+    allInboundPortsTcp: list[str]
+    allOutboundPortsTcp: list[str]
+    allInboundPortsUdp: list[str]
+    allOutboundPortsUdp: list[str]
+    mappedPortsByProtocol: list[AppImportPortByProtocol]
+    mappedPortsByProtocolInbound: list[AppImportPortByProtocol]
+
+
 # --- Semantic search models (Phase 3) ---
 
 

@@ -15,6 +15,9 @@ from sqlalchemy.exc import OperationalError
 
 from typing import List
 from models import (
+    AppImportMappedPort,
+    AppImportPortByProtocol,
+    AppImportServer,
     EnrichedPortResponse,
     MappedPort,
     MappedPortByProtocol,
@@ -57,9 +60,12 @@ try:
 
     @event.listens_for(engine, "connect")
     def _load_sqlite_vec(dbapi_conn, connection_record):
-        dbapi_conn.enable_load_extension(True)
-        sqlite_vec.load(dbapi_conn)
-        dbapi_conn.enable_load_extension(False)
+        try:
+            dbapi_conn.enable_load_extension(True)
+            sqlite_vec.load(dbapi_conn)
+            dbapi_conn.enable_load_extension(False)
+        except AttributeError:
+            pass  # Python built without SQLITE_ENABLE_LOAD_EXTENSION (e.g. macOS)
 except ImportError:
     pass
 
@@ -290,12 +296,14 @@ async def get_enriched_ports(name: str):
     return results
 
 
-@app.post("/products/{name}/topology", response_model=TopologyResponse)
-async def generate_topology(name: str, request: TopologyRequest):
-    """Resolve server topology via knowledge graph traversal."""
+def _resolve_topology_graph(name: str, request: TopologyRequest):
+    """Shared resolution logic for topology and app-import endpoints.
+
+    Returns (components, server_component_sets, component_to_servers,
+             matched_connections, all_connections, enrichment_version, unresolved).
+    """
     try:
         with engine.connect() as conn:
-            # 1. Load all graph data for this product into memory
             components = _load_components(conn, name)
             if not components["all"]:
                 raise HTTPException(
@@ -313,7 +321,6 @@ async def generate_topology(name: str, request: TopologyRequest):
             detail="Graph tables not found. Run the scraper without --skip-graph to build graph data.",
         )
 
-    # 2. Resolve each server's services to component IDs
     server_component_sets: dict[str, set[int]] = {}
     unresolved: list[str] = []
 
@@ -329,7 +336,6 @@ async def generate_topology(name: str, request: TopologyRequest):
         server_component_sets[server.name] = component_ids
         log.info("Server '%s': resolved %d component(s) from %d service(s)", server.name, len(component_ids), len(server.services))
 
-    # 3. Expand with variant generics
     for server_name, comp_ids in server_component_sets.items():
         expanded = set(comp_ids)
         for cid in comp_ids:
@@ -337,7 +343,6 @@ async def generate_topology(name: str, request: TopologyRequest):
                 expanded.add(variants[cid])
         server_component_sets[server_name] = expanded
 
-    # 4. Build reverse lookup: component_id → server name(s)
     component_to_servers: dict[int, list[str]] = defaultdict(list)
     for server_name, comp_ids in server_component_sets.items():
         for cid in comp_ids:
@@ -347,14 +352,23 @@ async def generate_topology(name: str, request: TopologyRequest):
     for comp_ids in server_component_sets.values():
         all_component_ids.update(comp_ids)
 
-    # 5. Filter connections to only those between resolved components
     matched_connections = []
     for conn_row in all_connections:
         src_id, tgt_id = conn_row["source_component_id"], conn_row["target_component_id"]
         if src_id in all_component_ids and tgt_id in all_component_ids:
             matched_connections.append(conn_row)
 
-    # 6. Build per-server topology
+    return (components, server_component_sets, component_to_servers,
+            matched_connections, all_connections, enrichment_version, unresolved)
+
+
+@app.post("/products/{name}/topology", response_model=TopologyResponse)
+async def generate_topology(name: str, request: TopologyRequest):
+    """Resolve server topology via knowledge graph traversal."""
+    (components, server_component_sets, component_to_servers,
+     matched_connections, all_connections, enrichment_version, unresolved) = \
+        _resolve_topology_graph(name, request)
+
     server_topologies = []
     for server in request.servers:
         topology = _build_server_topology(
@@ -366,7 +380,6 @@ async def generate_topology(name: str, request: TopologyRequest):
         )
         server_topologies.append(topology)
 
-    # 7. Build metadata
     total_product_connections = len(all_connections)
     total_matched = len(matched_connections)
     meta = TopologyMetadata(
@@ -382,6 +395,34 @@ async def generate_topology(name: str, request: TopologyRequest):
     )
 
     return TopologyResponse(product=name, servers=server_topologies, metadata=meta)
+
+
+@app.post("/products/{name}/app-import", response_model=List[AppImportServer])
+async def generate_app_import(name: str, request: TopologyRequest):
+    """Generate port mapping entries for Magic Ports frontend import."""
+    (components, server_component_sets, component_to_servers,
+     matched_connections, all_connections, _, _) = \
+        _resolve_topology_graph(name, request)
+
+    servers = []
+    for server in request.servers:
+        server_topology = _build_app_import_server(
+            server.name,
+            server_component_sets[server.name],
+            component_to_servers,
+            matched_connections,
+            components["all"],
+            name,
+            request.options.include_loopback,
+        )
+        servers.append(server_topology)
+
+    log.info(
+        "App import for '%s': %d servers from %d matched connections",
+        name, len(servers), len(matched_connections),
+    )
+
+    return servers
 
 
 def _load_components(conn, product: str) -> dict:
@@ -618,6 +659,136 @@ def _split_protocols(protocol: str) -> list[str]:
     return [p for p in parts if p in ("TCP", "UDP")]
 
 
+def _build_app_import_server(
+    server_name: str,
+    server_components: set[int],
+    component_to_servers: dict[int, list[str]],
+    connections: list[dict],
+    all_components: dict[int, dict],
+    product: str,
+    include_loopback: bool,
+) -> AppImportServer:
+    """Build the app-import server response for a single server.
+
+    Similar to _build_server_topology but with corrected sub-structures
+    matching the Magic Ports frontend import schema.
+    """
+    server_id = str(uuid.uuid4())
+    mapped_ports: list[AppImportMappedPort] = []
+    port_directions: list[str] = []  # track direction for aggregate grouping
+    seen: set[tuple] = set()
+
+    for conn_row in connections:
+        src_id = conn_row["source_component_id"]
+        tgt_id = conn_row["target_component_id"]
+        port = conn_row["port"]
+        protocol = conn_row["protocol"]
+        description = conn_row["description"] or ""
+        source_service = all_components[src_id]["original_name"]
+        target_service = all_components[tgt_id]["original_name"]
+
+        # Outbound: this server hosts the source component
+        if src_id in server_components:
+            for peer_server in component_to_servers.get(tgt_id, []):
+                if peer_server == server_name and not include_loopback:
+                    continue
+                dedup_key = (peer_server, port, protocol, "outbound")
+                if dedup_key not in seen:
+                    seen.add(dedup_key)
+                    mapped_ports.append(AppImportMappedPort(
+                        sourceServerId=server_id,
+                        sourceServerName=server_name,
+                        targetServerName=peer_server,
+                        sourceService=source_service,
+                        targetService=target_service,
+                        description=description,
+                        product=product,
+                        port=port, protocol=protocol,
+                    ))
+                    port_directions.append("outbound")
+
+        # Inbound: this server hosts the target component
+        if tgt_id in server_components:
+            for peer_server in component_to_servers.get(src_id, []):
+                if peer_server == server_name and not include_loopback:
+                    continue
+                dedup_key = (peer_server, port, protocol, "inbound")
+                if dedup_key not in seen:
+                    seen.add(dedup_key)
+                    mapped_ports.append(AppImportMappedPort(
+                        sourceServerId=server_id,
+                        sourceServerName=server_name,
+                        targetServerName=peer_server,
+                        sourceService=source_service,
+                        targetService=target_service,
+                        description=description,
+                        product=product,
+                        port=port, protocol=protocol,
+                    ))
+                    port_directions.append("inbound")
+
+    # Aggregate protocol lists
+    inbound_tcp, outbound_tcp = set(), set()
+    inbound_udp, outbound_udp = set(), set()
+    outbound_by_sp: dict[tuple, set] = defaultdict(set)
+    inbound_by_sp: dict[tuple, set] = defaultdict(set)
+
+    for mp, direction in zip(mapped_ports, port_directions):
+        protocols = _split_protocols(mp.protocol)
+        for proto in protocols:
+            if direction == "outbound":
+                if proto == "TCP":
+                    outbound_tcp.add(mp.port)
+                elif proto == "UDP":
+                    outbound_udp.add(mp.port)
+                outbound_by_sp[(mp.targetServerName, proto)].add(mp.port)
+            else:
+                if proto == "TCP":
+                    inbound_tcp.add(mp.port)
+                elif proto == "UDP":
+                    inbound_udp.add(mp.port)
+                inbound_by_sp[(mp.targetServerName, proto)].add(mp.port)
+
+    # Explode into per-port entries with index
+    mapped_by_protocol = []
+    idx = 0
+    for (server, proto), ports in sorted(outbound_by_sp.items()):
+        for port in sorted(ports):
+            mapped_by_protocol.append(AppImportPortByProtocol(
+                index=idx, serverName=server, service="",
+                protocol=proto, port=port,
+            ))
+            idx += 1
+
+    mapped_by_protocol_inbound = []
+    idx = 0
+    for (server, proto), ports in sorted(inbound_by_sp.items()):
+        for port in sorted(ports):
+            mapped_by_protocol_inbound.append(AppImportPortByProtocol(
+                index=idx, serverName=server, service="",
+                protocol=proto, port=port,
+            ))
+            idx += 1
+
+    peer_servers = set(mp.targetServerName for mp in mapped_ports if mp.targetServerName != server_name)
+    inbound_count = sum(1 for d in port_directions if d == "inbound")
+
+    return AppImportServer(
+        id=server_id,
+        sourceServer=server_name,
+        totalMappedPorts=len(mapped_ports),
+        totalMappedInboundPorts=inbound_count,
+        totalMappedServers=len(peer_servers),
+        mappedPorts=mapped_ports,
+        allInboundPortsTcp=sorted(inbound_tcp),
+        allOutboundPortsTcp=sorted(outbound_tcp),
+        allInboundPortsUdp=sorted(inbound_udp),
+        allOutboundPortsUdp=sorted(outbound_udp),
+        mappedPortsByProtocol=mapped_by_protocol,
+        mappedPortsByProtocolInbound=mapped_by_protocol_inbound,
+    )
+
+
 @app.get("/search", response_model=List[PortResponse])
 async def search_ports(q: str):
     pattern = f"%{q}%"
@@ -655,6 +826,9 @@ async def semantic_search(request: SemanticSearchRequest):
 
         query_bytes = embed_query(request.query)
 
+        # Over-fetch when no product filter to compensate for cross-product dedup
+        fetch_limit = request.limit if request.product else request.limit * 3
+
         with engine.connect() as conn:
             if request.product:
                 vec_rows = conn.execute(
@@ -663,7 +837,7 @@ async def semantic_search(request: SemanticSearchRequest):
                         FROM port_embeddings
                         WHERE embedding MATCH :q AND k = :limit AND product = :product
                     """),
-                    {"q": query_bytes, "limit": request.limit, "product": request.product},
+                    {"q": query_bytes, "limit": fetch_limit, "product": request.product},
                 ).fetchall()
             else:
                 vec_rows = conn.execute(
@@ -672,7 +846,7 @@ async def semantic_search(request: SemanticSearchRequest):
                         FROM port_embeddings
                         WHERE embedding MATCH :q AND k = :limit
                     """),
-                    {"q": query_bytes, "limit": request.limit},
+                    {"q": query_bytes, "limit": fetch_limit},
                 ).fetchall()
 
             if not vec_rows:
@@ -714,7 +888,28 @@ async def semantic_search(request: SemanticSearchRequest):
             ))
 
         results.sort(key=lambda r: r.similarity, reverse=True)
-        return SemanticSearchResponse(results=results, query=request.query)
+
+        # Deduplicate cross-product results when no product filter is specified.
+        # Same port rule appears in multiple products (e.g. VBR v13, VBR VMware v12.3);
+        # keep only the highest-similarity match for each unique port rule.
+        if not request.product:
+            seen = set()
+            deduped = []
+            for r in results:
+                key = (
+                    r.source_meta.canonical,
+                    r.target_meta.canonical,
+                    r.port,
+                    r.protocol,
+                )
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(r)
+            results = deduped
+
+        return SemanticSearchResponse(
+            results=results[:request.limit], query=request.query
+        )
 
     except (OperationalError, ValueError):
         log.exception("Vector search failed, falling back to keyword search")
@@ -724,6 +919,9 @@ async def semantic_search(request: SemanticSearchRequest):
 def _keyword_fallback(request: SemanticSearchRequest) -> SemanticSearchResponse:
     """Fall back to keyword search on enriched_ports when vectors are unavailable."""
     pattern = f"%{request.query}%"
+
+    # Over-fetch when no product filter to compensate for cross-product dedup
+    fetch_limit = request.limit if request.product else request.limit * 3
 
     try:
         with engine.connect() as conn:
@@ -736,7 +934,7 @@ def _keyword_fallback(request: SemanticSearchRequest) -> SemanticSearchResponse:
                 LIMIT :limit
             """)
             rows = conn.execute(
-                query, {"q": pattern, "product": request.product, "limit": request.limit}
+                query, {"q": pattern, "product": request.product, "limit": fetch_limit}
             ).mappings().all()
     except OperationalError:
         return SemanticSearchResponse(results=[], query=request.query, fallback=True)
@@ -759,7 +957,25 @@ def _keyword_fallback(request: SemanticSearchRequest) -> SemanticSearchResponse:
             similarity=0.0,
         ))
 
-    return SemanticSearchResponse(results=results, query=request.query, fallback=True)
+    # Deduplicate cross-product results when no product filter
+    if not request.product:
+        seen = set()
+        deduped = []
+        for r in results:
+            key = (
+                r.source_meta.canonical,
+                r.target_meta.canonical,
+                r.port,
+                r.protocol,
+            )
+            if key not in seen:
+                seen.add(key)
+                deduped.append(r)
+        results = deduped
+
+    return SemanticSearchResponse(
+        results=results[:request.limit], query=request.query, fallback=True
+    )
 
 
 @app.post("/generateExcelWithUrl")

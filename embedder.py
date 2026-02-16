@@ -91,14 +91,21 @@ def _create_embedding_table(conn: sqlite3.Connection) -> None:
 
 
 def _load_enriched_rows(conn: sqlite3.Connection) -> list[dict]:
-    """Load all enriched_ports rows with their rowids."""
+    """Load deduplicated enriched_ports rows with their rowids.
+
+    Groups by (product, source_canonical, target_canonical, port, protocol)
+    to avoid embedding the same port rule multiple times when it appears
+    under different subheadings. Concatenates distinct subheadings for context.
+    """
     cur = conn.cursor()
     cur.execute("""
-        SELECT rowid, product, source_canonical, target_canonical,
+        SELECT MIN(rowid) as rowid, product, source_canonical, target_canonical,
                port, protocol, description,
                source_os, source_hypervisor, source_storage_type,
-               target_os, target_hypervisor, target_storage_type
+               target_os, target_hypervisor, target_storage_type,
+               GROUP_CONCAT(DISTINCT subheading) as subheadings
         FROM enriched_ports
+        GROUP BY product, source_canonical, target_canonical, port, protocol
     """)
     columns = [desc[0] for desc in cur.description]
     return [dict(zip(columns, row)) for row in cur.fetchall()]
@@ -106,11 +113,14 @@ def _load_enriched_rows(conn: sqlite3.Connection) -> list[dict]:
 
 def _build_embedding_text(row: dict) -> str:
     """Construct the text string to embed for a single enriched_ports row."""
+    subheadings = row.get("subheadings") or ""
     parts = [
         f"[{row['product']}]",
+        f"[{subheadings}]" if subheadings else "",
         f"{row['source_canonical']} -> {row['target_canonical']}",
         f"| Port: {row['port']} {row['protocol']}",
     ]
+    parts = [p for p in parts if p]
 
     desc = row.get("description")
     if desc:
