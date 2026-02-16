@@ -152,10 +152,12 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def write_to_db(df: pd.DataFrame, db_path: str) -> None:
-    """Drop and recreate the all_ports table, then insert all rows."""
-    con = sqlite3.connect(db_path)
-    cur = con.cursor()
+def write_to_db(df: pd.DataFrame, conn: sqlite3.Connection) -> None:
+    """Drop and recreate the all_ports table, then insert all rows.
+
+    The caller manages the connection lifecycle (commit/close).
+    """
+    cur = conn.cursor()
     cur.execute("DROP TABLE IF EXISTS all_ports")
     cur.execute(
         """
@@ -177,9 +179,7 @@ def write_to_db(df: pd.DataFrame, db_path: str) -> None:
         "INSERT INTO all_ports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         data,
     )
-    con.commit()
-    con.close()
-    log.info("Wrote %d rows to %s", len(data), db_path)
+    log.info("Wrote %d rows to all_ports", len(data))
 
 
 def main():
@@ -187,6 +187,10 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Scrape but don't write to DB")
     parser.add_argument("--db", default=DB_PATH, help=f"Database path (default: {DB_PATH})")
     parser.add_argument("--config", default=CONFIG_PATH, help=f"Config path (default: {CONFIG_PATH})")
+    parser.add_argument(
+        "--skip-enrichment", action="store_true",
+        help="Skip LLM enrichment (write only raw all_ports table)",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -222,8 +226,44 @@ def main():
         print(f"\nProducts: {df['product'].nunique()}")
         print(f"Rows per product:")
         print(df["product"].value_counts().to_string())
-    else:
-        write_to_db(df, args.db)
+        return
+
+    # Build the database in a staging file, then swap atomically
+    staging_db = args.db + ".staging"
+    if os.path.exists(staging_db):
+        os.remove(staging_db)
+
+    conn = sqlite3.connect(staging_db)
+    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        write_to_db(df, conn)
+
+        if not args.skip_enrichment:
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
+            if not api_key:
+                log.error("ANTHROPIC_API_KEY not set. Use --skip-enrichment to skip.")
+                conn.close()
+                os.remove(staging_db)
+                sys.exit(1)
+
+            from enricher import enrich_service_names, write_enriched_table
+
+            unique_names = sorted(
+                set(df["sourceService"].tolist() + df["targetService"].tolist()) - {""}
+            )
+            log.info("Enriching %d unique service names", len(unique_names))
+            enrichment = enrich_service_names(unique_names, api_key)
+            write_enriched_table(conn, df, enrichment)
+
+        conn.commit()
+        conn.close()
+        os.replace(staging_db, args.db)
+        log.info("Database swapped successfully: %s", args.db)
+    except Exception:
+        conn.close()
+        if os.path.exists(staging_db):
+            os.remove(staging_db)
+        raise
 
 
 if __name__ == "__main__":
