@@ -191,6 +191,10 @@ def main():
         "--skip-enrichment", action="store_true",
         help="Skip LLM enrichment (write only raw all_ports table)",
     )
+    parser.add_argument(
+        "--skip-graph", action="store_true",
+        help="Skip graph construction (write only raw + enriched tables)",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -254,6 +258,11 @@ def main():
             log.info("Enriching %d unique service names", len(unique_names))
             enrichment = enrich_service_names(unique_names, api_key)
             write_enriched_table(conn, df, enrichment)
+
+            if not args.skip_graph:
+                from graph_builder import build_graph
+
+                build_graph(conn)
 
         conn.commit()
         conn.close()

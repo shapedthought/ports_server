@@ -56,3 +56,63 @@ class EnrichedPortResponse(BaseModel):
     description: str = Field(..., alias="description")
     source_meta: ServiceMeta
     target_meta: ServiceMeta
+
+
+# --- Topology request/response models (Phase 2) ---
+
+
+class TopologyServer(BaseModel):
+    name: str
+    services: list[str]
+
+
+class TopologyOptions(BaseModel):
+    include_loopback: bool = False
+    include_unresolved: bool = False
+
+
+class TopologyRequest(BaseModel):
+    servers: list[TopologyServer]
+    options: TopologyOptions = TopologyOptions()
+
+
+class MappedPort(BaseModel):
+    server: str
+    port: str
+    protocol: str
+    description: str
+    direction: str
+
+
+class MappedPortByProtocol(BaseModel):
+    server: str
+    protocol: str
+    ports: list[str]
+
+
+class ServerTopology(BaseModel):
+    id: str
+    sourceServer: str
+    totalMappedPorts: int
+    totalMappedInboundPorts: int
+    totalMappedServers: int
+    mappedPorts: list[MappedPort]
+    allInboundPortsTcp: list[str]
+    allOutboundPortsTcp: list[str]
+    allInboundPortsUdp: list[str]
+    allOutboundPortsUdp: list[str]
+    mappedPortsByProtocol: list[MappedPortByProtocol]
+    mappedPortsByProtocolInbound: list[MappedPortByProtocol]
+
+
+class TopologyMetadata(BaseModel):
+    total_entries_matched: int
+    total_entries_skipped: int
+    enrichment_version: str | None = None
+    unresolved_services: list[str] = []
+
+
+class TopologyResponse(BaseModel):
+    product: str
+    servers: list[ServerTopology]
+    metadata: TopologyMetadata

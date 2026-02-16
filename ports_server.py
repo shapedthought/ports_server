@@ -1,7 +1,10 @@
 import json
+import logging
 import os
 import uuid
 import time
+from collections import defaultdict
+
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -12,13 +15,21 @@ from sqlalchemy.exc import OperationalError
 from typing import List
 from models import (
     EnrichedPortResponse,
+    MappedPort,
+    MappedPortByProtocol,
     PortResponse,
+    ServerTopology,
     ServiceMeta,
     TargetRequest,
+    TopologyMetadata,
+    TopologyRequest,
+    TopologyResponse,
     PortRequest,
     SourceRequest,
     SourceResponse,
 )
+
+log = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -241,6 +252,323 @@ async def get_enriched_ports(name: str):
             target_meta=target_meta,
         ))
     return results
+
+
+@app.post("/products/{name}/topology", response_model=TopologyResponse)
+async def generate_topology(name: str, request: TopologyRequest):
+    """Resolve server topology via knowledge graph traversal."""
+    try:
+        with engine.connect() as conn:
+            # 1. Load all graph data for this product into memory
+            components = _load_components(conn, name)
+            if not components["all"]:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No graph data found for product '{name}'. Run the scraper with enrichment enabled.",
+                )
+
+            variants = _load_variants(conn, components["all"])
+            enrichment_lookup = _load_enrichment_lookup(conn, name)
+            all_connections = _load_connections(conn, name)
+            enrichment_version = _get_enrichment_version(conn, name)
+    except OperationalError:
+        raise HTTPException(
+            status_code=404,
+            detail="Graph data is not yet available. Run the scraper with enrichment enabled.",
+        )
+
+    # 2. Resolve each server's services to component IDs
+    server_component_sets: dict[str, set[int]] = {}
+    unresolved: list[str] = []
+
+    for server in request.servers:
+        component_ids: set[int] = set()
+        for service_name in server.services:
+            resolved = _resolve_service(service_name, components, enrichment_lookup)
+            if resolved:
+                component_ids.update(resolved)
+            else:
+                unresolved.append(service_name)
+        server_component_sets[server.name] = component_ids
+
+    # 3. Expand with variant generics
+    for server_name, comp_ids in server_component_sets.items():
+        expanded = set(comp_ids)
+        for cid in comp_ids:
+            if cid in variants:
+                expanded.add(variants[cid])
+        server_component_sets[server_name] = expanded
+
+    # 4. Build reverse lookup: component_id → server name(s)
+    component_to_servers: dict[int, list[str]] = defaultdict(list)
+    for server_name, comp_ids in server_component_sets.items():
+        for cid in comp_ids:
+            component_to_servers[cid].append(server_name)
+
+    all_component_ids = set()
+    for comp_ids in server_component_sets.values():
+        all_component_ids.update(comp_ids)
+
+    # 5. Filter connections to only those between resolved components
+    matched_connections = []
+    for conn_row in all_connections:
+        src_id, tgt_id = conn_row["source_component_id"], conn_row["target_component_id"]
+        if src_id in all_component_ids and tgt_id in all_component_ids:
+            matched_connections.append(conn_row)
+
+    # 6. Build per-server topology
+    server_topologies = []
+    for server in request.servers:
+        topology = _build_server_topology(
+            server.name,
+            server_component_sets[server.name],
+            component_to_servers,
+            matched_connections,
+            request.options.include_loopback,
+        )
+        server_topologies.append(topology)
+
+    # 7. Build metadata
+    total_product_connections = len(all_connections)
+    total_matched = len(matched_connections)
+    meta = TopologyMetadata(
+        total_entries_matched=total_matched,
+        total_entries_skipped=total_product_connections - total_matched,
+        enrichment_version=enrichment_version,
+        unresolved_services=unresolved,
+    )
+
+    return TopologyResponse(product=name, servers=server_topologies, metadata=meta)
+
+
+def _load_components(conn, product: str) -> dict:
+    """Load all components for a product into memory for fast resolution."""
+    rows = conn.execute(
+        text("SELECT id, canonical, os, hypervisor, storage_type, original_name FROM components WHERE product = :p"),
+        {"p": product},
+    ).mappings().all()
+
+    by_original: dict[str, list[int]] = defaultdict(list)
+    by_original_lower: dict[str, list[int]] = defaultdict(list)
+    by_key: dict[tuple, int] = {}
+    by_canonical: dict[str, list[int]] = defaultdict(list)
+    all_components: dict[int, dict] = {}
+
+    for row in rows:
+        cid = row["id"]
+        orig = row["original_name"] or ""
+        canonical = row["canonical"]
+        os_val = row["os"] or None
+        hyp = row["hypervisor"] or None
+        storage = row["storage_type"] or None
+
+        all_components[cid] = dict(row)
+        by_original[orig].append(cid)
+        by_original_lower[orig.lower()].append(cid)
+        by_key[(canonical, os_val, hyp, storage)] = cid
+        by_canonical[canonical].append(cid)
+
+    return {
+        "by_original": by_original,
+        "by_original_lower": by_original_lower,
+        "by_key": by_key,
+        "by_canonical": by_canonical,
+        "all": all_components,
+    }
+
+
+def _load_variants(conn, all_components: dict[int, dict]) -> dict[int, int]:
+    """Load variant links: specific_id → generic_id."""
+    component_ids = list(all_components.keys())
+    if not component_ids:
+        return {}
+
+    placeholders = ",".join(str(cid) for cid in component_ids)
+    rows = conn.execute(
+        text(f"SELECT specific_id, generic_id FROM component_variants WHERE specific_id IN ({placeholders})"),
+    ).fetchall()
+
+    return {row[0]: row[1] for row in rows}
+
+
+def _load_enrichment_lookup(conn, product: str) -> dict[str, tuple]:
+    """Map raw service names to (canonical, os, hypervisor, storage_type)."""
+    rows = conn.execute(
+        text("""
+            SELECT DISTINCT sourceService, source_canonical, source_os, source_hypervisor, source_storage_type
+            FROM enriched_ports WHERE product = :p
+            UNION
+            SELECT DISTINCT targetService, target_canonical, target_os, target_hypervisor, target_storage_type
+            FROM enriched_ports WHERE product = :p
+        """),
+        {"p": product},
+    ).fetchall()
+
+    lookup: dict[str, tuple] = {}
+    for row in rows:
+        service_name = row[0]
+        if service_name and service_name not in lookup:
+            lookup[service_name] = (
+                row[1],
+                row[2] or None,
+                row[3] or None,
+                row[4] or None,
+            )
+    return lookup
+
+
+def _load_connections(conn, product: str) -> list[dict]:
+    """Load all connections for a product."""
+    rows = conn.execute(
+        text("""
+            SELECT source_component_id, target_component_id, port, protocol, description
+            FROM connections WHERE product = :p
+        """),
+        {"p": product},
+    ).mappings().all()
+
+    return [dict(r) for r in rows]
+
+
+def _get_enrichment_version(conn, product: str) -> str | None:
+    """Get the enrichment version for a product."""
+    row = conn.execute(
+        text("SELECT enrichment_version FROM enriched_ports WHERE product = :p LIMIT 1"),
+        {"p": product},
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _resolve_service(
+    service_name: str,
+    components: dict,
+    enrichment_lookup: dict[str, tuple],
+) -> list[int]:
+    """Resolve a user-provided service name to component IDs.
+
+    Priority: exact original_name → case-insensitive original → enrichment lookup → canonical match.
+    """
+    # Priority 1: exact match on original_name
+    if service_name in components["by_original"]:
+        return components["by_original"][service_name]
+
+    # Priority 2: case-insensitive match on original_name
+    lower = service_name.lower()
+    if lower in components["by_original_lower"]:
+        return components["by_original_lower"][lower]
+
+    # Priority 3: enrichment lookup (service name → canonical + qualifiers → component key)
+    if service_name in enrichment_lookup:
+        canonical, os_val, hyp, storage = enrichment_lookup[service_name]
+        key = (canonical, os_val, hyp, storage)
+        if key in components["by_key"]:
+            return [components["by_key"][key]]
+
+    # Priority 4: canonical name match
+    if lower in components["by_canonical"]:
+        return components["by_canonical"][lower]
+
+    return []
+
+
+def _build_server_topology(
+    server_name: str,
+    server_components: set[int],
+    component_to_servers: dict[int, list[str]],
+    connections: list[dict],
+    include_loopback: bool,
+) -> ServerTopology:
+    """Build the topology response for a single server."""
+    mapped_ports: list[MappedPort] = []
+    seen: set[tuple] = set()  # dedupe on (peer_server, port, protocol, direction)
+
+    for conn_row in connections:
+        src_id = conn_row["source_component_id"]
+        tgt_id = conn_row["target_component_id"]
+        port = conn_row["port"]
+        protocol = conn_row["protocol"]
+        description = conn_row["description"] or ""
+
+        # Outbound: this server is source, other server is target
+        if src_id in server_components:
+            for peer_server in component_to_servers.get(tgt_id, []):
+                if peer_server == server_name and not include_loopback:
+                    continue
+                dedup_key = (peer_server, port, protocol, "outbound")
+                if dedup_key not in seen:
+                    seen.add(dedup_key)
+                    mapped_ports.append(MappedPort(
+                        server=peer_server, port=port, protocol=protocol,
+                        description=description, direction="outbound",
+                    ))
+
+        # Inbound: this server is target, other server is source
+        if tgt_id in server_components:
+            for peer_server in component_to_servers.get(src_id, []):
+                if peer_server == server_name and not include_loopback:
+                    continue
+                dedup_key = (peer_server, port, protocol, "inbound")
+                if dedup_key not in seen:
+                    seen.add(dedup_key)
+                    mapped_ports.append(MappedPort(
+                        server=peer_server, port=port, protocol=protocol,
+                        description=description, direction="inbound",
+                    ))
+
+    # Aggregate protocol lists
+    inbound_tcp, outbound_tcp = set(), set()
+    inbound_udp, outbound_udp = set(), set()
+    outbound_by_sp: dict[tuple, set] = defaultdict(set)
+    inbound_by_sp: dict[tuple, set] = defaultdict(set)
+
+    for mp in mapped_ports:
+        protocols = _split_protocols(mp.protocol)
+        for proto in protocols:
+            if mp.direction == "outbound":
+                if proto == "TCP":
+                    outbound_tcp.add(mp.port)
+                elif proto == "UDP":
+                    outbound_udp.add(mp.port)
+                outbound_by_sp[(mp.server, proto)].add(mp.port)
+            else:
+                if proto == "TCP":
+                    inbound_tcp.add(mp.port)
+                elif proto == "UDP":
+                    inbound_udp.add(mp.port)
+                inbound_by_sp[(mp.server, proto)].add(mp.port)
+
+    mapped_by_protocol = [
+        MappedPortByProtocol(server=s, protocol=p, ports=sorted(ports))
+        for (s, p), ports in sorted(outbound_by_sp.items())
+    ]
+    mapped_by_protocol_inbound = [
+        MappedPortByProtocol(server=s, protocol=p, ports=sorted(ports))
+        for (s, p), ports in sorted(inbound_by_sp.items())
+    ]
+
+    peer_servers = set(mp.server for mp in mapped_ports if mp.server != server_name)
+    inbound_count = sum(1 for mp in mapped_ports if mp.direction == "inbound")
+
+    return ServerTopology(
+        id=str(uuid.uuid4()),
+        sourceServer=server_name,
+        totalMappedPorts=len(mapped_ports),
+        totalMappedInboundPorts=inbound_count,
+        totalMappedServers=len(peer_servers),
+        mappedPorts=mapped_ports,
+        allInboundPortsTcp=sorted(inbound_tcp),
+        allOutboundPortsTcp=sorted(outbound_tcp),
+        allInboundPortsUdp=sorted(inbound_udp),
+        allOutboundPortsUdp=sorted(outbound_udp),
+        mappedPortsByProtocol=mapped_by_protocol,
+        mappedPortsByProtocolInbound=mapped_by_protocol_inbound,
+    )
+
+
+def _split_protocols(protocol: str) -> list[str]:
+    """Split a protocol string like 'TCP, UDP' into individual protocols."""
+    parts = [p.strip().upper() for p in protocol.replace("/", ",").split(",")]
+    return [p for p in parts if p in ("TCP", "UDP")]
 
 
 @app.get("/search", response_model=List[PortResponse])
