@@ -116,3 +116,33 @@ class TopologyResponse(BaseModel):
     product: str
     servers: list[ServerTopology]
     metadata: TopologyMetadata
+
+
+# --- Semantic search models (Phase 3) ---
+
+
+class SemanticSearchRequest(BaseModel):
+    query: str
+    product: str | None = None
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class SemanticSearchResult(BaseModel):
+    subheading: str
+    subheadingL2: str
+    subheadingL3: str
+    product: str
+    sourceService: str
+    targetService: str
+    protocol: str
+    port: str
+    description: str
+    source_meta: ServiceMeta
+    target_meta: ServiceMeta
+    similarity: float
+
+
+class SemanticSearchResponse(BaseModel):
+    results: list[SemanticSearchResult]
+    query: str
+    fallback: bool = False

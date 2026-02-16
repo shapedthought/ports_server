@@ -9,3 +9,5 @@ requests==2.32.3
 numpy==2.2.3
 lxml==5.3.1
 anthropic>=0.52.0
+sqlite-vec>=0.1.6
+fastembed>=0.6.0
