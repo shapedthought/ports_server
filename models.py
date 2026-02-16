@@ -33,3 +33,26 @@ class SourceResponse(BaseModel):
     product: str
     subheading: str
     sourceService: str
+
+
+class ServiceMeta(BaseModel):
+    canonical: str
+    roles: list[str]
+    os: str | None = None
+    hypervisor: str | None = None
+    storage_type: str | None = None
+    original: str
+
+
+class EnrichedPortResponse(BaseModel):
+    subheading: str = Field(..., alias="subheading")
+    subheadingL2: str = Field(..., alias="subheadingL2")
+    subheadingL3: str = Field(..., alias="subheadingL3")
+    product: str = Field(..., alias="product")
+    sourceService: str = Field(..., alias="sourceService")
+    targetService: str = Field(..., alias="targetService")
+    protocol: str = Field(..., alias="protocol")
+    port: str = Field(..., alias="port")
+    description: str = Field(..., alias="description")
+    source_meta: ServiceMeta
+    target_meta: ServiceMeta

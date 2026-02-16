@@ -1,6 +1,6 @@
 fastapi==0.116.1
 uvicorn==0.35.0
-sqlalchemy==2.0.25
+sqlalchemy>=2.0.25
 pandas==2.2.3
 openpyxl==3.0.9
 html5lib==1.1
@@ -8,3 +8,4 @@ beautifulsoup4==4.13.4
 requests==2.32.3
 numpy==2.2.3
 lxml==5.3.1
+anthropic>=0.52.0

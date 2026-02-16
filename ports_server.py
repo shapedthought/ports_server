@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 import time
@@ -5,12 +6,14 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, MetaData, Table, select, distinct, or_
+from sqlalchemy import create_engine, MetaData, Table, select, distinct, or_, text
+from sqlalchemy.exc import OperationalError
 
-# from pydantic import BaseModel
 from typing import List
 from models import (
+    EnrichedPortResponse,
     PortResponse,
+    ServiceMeta,
     TargetRequest,
     PortRequest,
     SourceRequest,
@@ -179,6 +182,65 @@ async def get_product_subheadings(name: str) -> List[str]:
     with engine.connect() as conn:
         result = conn.execute(stmt)
         return [row[0] for row in result]
+
+
+@app.get("/products/{name}/enriched-ports", response_model=List[EnrichedPortResponse])
+async def get_enriched_ports(name: str):
+    query = text("""
+        SELECT * FROM enriched_ports
+        WHERE product = :product
+        ORDER BY subheading, subheadingL2, subheadingL3
+    """)
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(query, {"product": name}).mappings().all()
+    except OperationalError:
+        raise HTTPException(
+            status_code=404,
+            detail="Enriched port data is not yet available. Run the scraper with enrichment enabled.",
+        )
+
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No enriched data found for product '{name}'")
+
+    def _parse_roles(raw: str) -> list[str]:
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    results = []
+    for row in rows:
+        source_meta = ServiceMeta(
+            canonical=row["source_canonical"],
+            roles=_parse_roles(row["source_roles"]),
+            os=row["source_os"] or None,
+            hypervisor=row["source_hypervisor"] or None,
+            storage_type=row["source_storage_type"] or None,
+            original=row["sourceService"],
+        )
+        target_meta = ServiceMeta(
+            canonical=row["target_canonical"],
+            roles=_parse_roles(row["target_roles"]),
+            os=row["target_os"] or None,
+            hypervisor=row["target_hypervisor"] or None,
+            storage_type=row["target_storage_type"] or None,
+            original=row["targetService"],
+        )
+        results.append(EnrichedPortResponse(
+            subheading=row["subheading"],
+            subheadingL2=row["subheadingL2"],
+            subheadingL3=row["subheadingL3"],
+            product=row["product"],
+            sourceService=row["sourceService"],
+            targetService=row["targetService"],
+            protocol=row["protocol"],
+            port=row["port"],
+            description=row["description"],
+            source_meta=source_meta,
+            target_meta=target_meta,
+        ))
+    return results
 
 
 @app.get("/search", response_model=List[PortResponse])

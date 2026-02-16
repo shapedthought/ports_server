@@ -15,13 +15,16 @@ spec:
         spec:
           containers:
           - name: scraper
-            image: txtxx56/ports_server:0.91
+            image: txtxx56/ports_server:0.92
             command: ["python", "scrape_ports.py"]
             env:
             - name: DB_PATH
               value: "/data/allports_updated.db"
             - name: CONFIG_PATH
               value: "/config/configuration.json"
+            envFrom:
+            - secretRef:
+                name: veeam-ports-enrichment
             volumeMounts:
             - name: db-storage
               mountPath: /data
