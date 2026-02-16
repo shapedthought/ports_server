@@ -264,17 +264,17 @@ async def generate_topology(name: str, request: TopologyRequest):
             if not components["all"]:
                 raise HTTPException(
                     status_code=404,
-                    detail=f"No graph data found for product '{name}'. Run the scraper with enrichment enabled.",
+                    detail=f"No graph data found for product '{name}'. Run the scraper with enrichment and graph construction enabled.",
                 )
 
-            variants = _load_variants(conn, components["all"])
+            variants = _load_variants(conn, name)
             enrichment_lookup = _load_enrichment_lookup(conn, name)
             all_connections = _load_connections(conn, name)
             enrichment_version = _get_enrichment_version(conn, name)
     except OperationalError:
         raise HTTPException(
             status_code=404,
-            detail="Graph data is not yet available. Run the scraper with enrichment enabled.",
+            detail="Graph tables not found. Run the scraper without --skip-graph to build graph data.",
         )
 
     # 2. Resolve each server's services to component IDs
@@ -289,7 +289,9 @@ async def generate_topology(name: str, request: TopologyRequest):
                 component_ids.update(resolved)
             else:
                 unresolved.append(service_name)
+                log.warning("Could not resolve service '%s' for server '%s'", service_name, server.name)
         server_component_sets[server.name] = component_ids
+        log.info("Server '%s': resolved %d component(s) from %d service(s)", server.name, len(component_ids), len(server.services))
 
     # 3. Expand with variant generics
     for server_name, comp_ids in server_component_sets.items():
@@ -335,7 +337,12 @@ async def generate_topology(name: str, request: TopologyRequest):
         total_entries_matched=total_matched,
         total_entries_skipped=total_product_connections - total_matched,
         enrichment_version=enrichment_version,
-        unresolved_services=unresolved,
+        unresolved_services=unresolved if request.options.include_unresolved else [],
+    )
+
+    log.info(
+        "Topology for '%s': %d connections matched, %d skipped, %d unresolved services",
+        name, total_matched, total_product_connections - total_matched, len(unresolved),
     )
 
     return TopologyResponse(product=name, servers=server_topologies, metadata=meta)
@@ -377,15 +384,16 @@ def _load_components(conn, product: str) -> dict:
     }
 
 
-def _load_variants(conn, all_components: dict[int, dict]) -> dict[int, int]:
-    """Load variant links: specific_id → generic_id."""
-    component_ids = list(all_components.keys())
-    if not component_ids:
-        return {}
-
-    placeholders = ",".join(str(cid) for cid in component_ids)
+def _load_variants(conn, product: str) -> dict[int, int]:
+    """Load variant links: specific_id → generic_id for a product."""
     rows = conn.execute(
-        text(f"SELECT specific_id, generic_id FROM component_variants WHERE specific_id IN ({placeholders})"),
+        text("""
+            SELECT cv.specific_id, cv.generic_id
+            FROM component_variants cv
+            JOIN components c ON cv.specific_id = c.id
+            WHERE c.product = :p
+        """),
+        {"p": product},
     ).fetchall()
 
     return {row[0]: row[1] for row in rows}
@@ -464,8 +472,11 @@ def _resolve_service(
         if key in components["by_key"]:
             return [components["by_key"][key]]
 
-    # Priority 4: canonical name match
+    # Priority 4: canonical name match — prefer fully-generic component to avoid variant cross-contamination
     if lower in components["by_canonical"]:
+        generic_key = (lower, None, None, None)
+        if generic_key in components["by_key"]:
+            return [components["by_key"][generic_key]]
         return components["by_canonical"][lower]
 
     return []

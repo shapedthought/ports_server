@@ -73,7 +73,7 @@ class TopologyOptions(BaseModel):
 
 class TopologyRequest(BaseModel):
     servers: list[TopologyServer]
-    options: TopologyOptions = TopologyOptions()
+    options: TopologyOptions = Field(default_factory=TopologyOptions)
 
 
 class MappedPort(BaseModel):
@@ -109,7 +109,7 @@ class TopologyMetadata(BaseModel):
     total_entries_matched: int
     total_entries_skipped: int
     enrichment_version: str | None = None
-    unresolved_services: list[str] = []
+    unresolved_services: list[str] = Field(default_factory=list)
 
 
 class TopologyResponse(BaseModel):
