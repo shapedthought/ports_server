@@ -248,14 +248,18 @@ def _validate_and_fix(
         for field in ("os", "hypervisor", "storage_type"):
             val = item.get(field)
             if isinstance(val, list):
+                log.warning("Flattening list to first value for %s.%s: %s", original_name, field, val)
                 val = val[0] if val else None
             if val in (None, "null", "none", "None", ""):
                 val = None
             item[field] = val
 
-        # Ensure roles is a list
-        if isinstance(item.get("roles"), str):
-            item["roles"] = [item["roles"]]
+        # Ensure roles is a list and never None
+        roles = item.get("roles")
+        if roles is None:
+            item["roles"] = []
+        elif isinstance(roles, str):
+            item["roles"] = [roles]
 
         results.append(ServiceMeta(**item))
 
