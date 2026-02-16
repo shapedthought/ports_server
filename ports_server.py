@@ -670,12 +670,12 @@ def _build_app_import_server(
 ) -> AppImportServer:
     """Build the app-import server response for a single server.
 
-    Similar to _build_server_topology but with corrected sub-structures
-    matching the Magic Ports frontend import schema.
+    Only includes outbound entries (where this server hosts the source
+    component). The frontend derives inbound by cross-referencing all
+    servers' mappedPorts where targetServerName matches this server.
     """
     server_id = str(uuid.uuid4())
     mapped_ports: list[AppImportMappedPort] = []
-    port_directions: list[str] = []  # track direction for aggregate grouping
     seen: set[tuple] = set()
 
     for conn_row in connections:
@@ -687,12 +687,13 @@ def _build_app_import_server(
         source_service = all_components[src_id]["original_name"]
         target_service = all_components[tgt_id]["original_name"]
 
-        # Outbound: this server hosts the source component
+        # Outbound only: this server hosts the source component
         if src_id in server_components:
             for peer_server in component_to_servers.get(tgt_id, []):
                 if peer_server == server_name and not include_loopback:
                     continue
-                dedup_key = (peer_server, port, protocol, "outbound")
+                dedup_key = (server_name, peer_server, source_service,
+                             target_service, port, protocol)
                 if dedup_key not in seen:
                     seen.add(dedup_key)
                     mapped_ports.append(AppImportMappedPort(
@@ -705,51 +706,20 @@ def _build_app_import_server(
                         product=product,
                         port=port, protocol=protocol,
                     ))
-                    port_directions.append("outbound")
 
-        # Inbound: this server hosts the target component
-        if tgt_id in server_components:
-            for peer_server in component_to_servers.get(src_id, []):
-                if peer_server == server_name and not include_loopback:
-                    continue
-                dedup_key = (peer_server, port, protocol, "inbound")
-                if dedup_key not in seen:
-                    seen.add(dedup_key)
-                    mapped_ports.append(AppImportMappedPort(
-                        sourceServerId=server_id,
-                        sourceServerName=server_name,
-                        targetServerName=peer_server,
-                        sourceService=target_service,
-                        targetService=source_service,
-                        description=description,
-                        product=product,
-                        port=port, protocol=protocol,
-                    ))
-                    port_directions.append("inbound")
-
-    # Aggregate protocol lists
-    inbound_tcp, outbound_tcp = set(), set()
-    inbound_udp, outbound_udp = set(), set()
+    # Aggregate outbound protocol lists
+    outbound_tcp: set[str] = set()
+    outbound_udp: set[str] = set()
     outbound_by_sp: dict[tuple, set] = defaultdict(set)
-    inbound_by_sp: dict[tuple, set] = defaultdict(set)
 
-    for mp, direction in zip(mapped_ports, port_directions):
-        protocols = _split_protocols(mp.protocol)
-        for proto in protocols:
-            if direction == "outbound":
-                if proto == "TCP":
-                    outbound_tcp.add(mp.port)
-                elif proto == "UDP":
-                    outbound_udp.add(mp.port)
-                outbound_by_sp[(mp.targetServerName, proto)].add(mp.port)
-            else:
-                if proto == "TCP":
-                    inbound_tcp.add(mp.port)
-                elif proto == "UDP":
-                    inbound_udp.add(mp.port)
-                inbound_by_sp[(mp.targetServerName, proto)].add(mp.port)
+    for mp in mapped_ports:
+        for proto in _split_protocols(mp.protocol):
+            if proto == "TCP":
+                outbound_tcp.add(mp.port)
+            elif proto == "UDP":
+                outbound_udp.add(mp.port)
+            outbound_by_sp[(mp.targetServerName, proto)].add(mp.port)
 
-    # Explode into per-port entries with index
     mapped_by_protocol = []
     idx = 0
     for (server, proto), ports in sorted(outbound_by_sp.items()):
@@ -760,32 +730,22 @@ def _build_app_import_server(
             ))
             idx += 1
 
-    mapped_by_protocol_inbound = []
-    idx = 0
-    for (server, proto), ports in sorted(inbound_by_sp.items()):
-        for port in sorted(ports):
-            mapped_by_protocol_inbound.append(AppImportPortByProtocol(
-                index=idx, serverName=server, service="",
-                protocol=proto, port=port,
-            ))
-            idx += 1
-
-    peer_servers = set(mp.targetServerName for mp in mapped_ports if mp.targetServerName != server_name)
-    inbound_count = sum(1 for d in port_directions if d == "inbound")
+    peer_servers = set(mp.targetServerName for mp in mapped_ports
+                       if mp.targetServerName != server_name)
 
     return AppImportServer(
         id=server_id,
         sourceServer=server_name,
         totalMappedPorts=len(mapped_ports),
-        totalMappedInboundPorts=inbound_count,
+        totalMappedInboundPorts=0,
         totalMappedServers=len(peer_servers),
         mappedPorts=mapped_ports,
-        allInboundPortsTcp=sorted(inbound_tcp),
+        allInboundPortsTcp=[],
         allOutboundPortsTcp=sorted(outbound_tcp),
-        allInboundPortsUdp=sorted(inbound_udp),
+        allInboundPortsUdp=[],
         allOutboundPortsUdp=sorted(outbound_udp),
         mappedPortsByProtocol=mapped_by_protocol,
-        mappedPortsByProtocolInbound=mapped_by_protocol_inbound,
+        mappedPortsByProtocolInbound=[],
     )
 
 

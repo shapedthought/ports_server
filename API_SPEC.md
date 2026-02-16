@@ -181,7 +181,7 @@ Resolve server topology — given named servers with assigned services, returns 
 ---
 
 ### POST `/products/{name}/app-import`
-Generate port mapping entries for Magic Ports frontend import. Same request body as `/topology`, returns a server-centric nested structure with corrected sub-models matching the frontend import schema.
+Generate port mapping entries for Magic Ports frontend import. Same request body as `/topology`, returns a server-centric nested structure matching the frontend import schema. Each server's `mappedPorts[]` contains **outbound-only** entries (where the server is the connection initiator). The frontend derives inbound port requirements by cross-referencing all servers' entries where `targetServerName` matches.
 
 **Path params:** `name` — product name
 
@@ -194,8 +194,8 @@ Generate port mapping entries for Magic Ports frontend import. Same request body
   {
     "id": "uuid-here",
     "sourceServer": "VBR Appliance",
-    "totalMappedPorts": 13,
-    "totalMappedInboundPorts": 4,
+    "totalMappedPorts": 9,
+    "totalMappedInboundPorts": 0,
     "totalMappedServers": 4,
     "mappedPorts": [
       {
@@ -210,17 +210,15 @@ Generate port mapping entries for Magic Ports frontend import. Same request body
         "protocol": "TCP"
       }
     ],
-    "allInboundPortsTcp": ["6162, 2500 to 3300"],
-    "allOutboundPortsTcp": ["22", "6160"],
+    "allInboundPortsTcp": [],
+    "allOutboundPortsTcp": ["22", "443", "6160", "6162, 2500 to 3300"],
     "allInboundPortsUdp": [],
     "allOutboundPortsUdp": [],
     "mappedPortsByProtocol": [
       {"index": 0, "serverName": "Linux Proxy", "service": "", "protocol": "TCP", "port": "22"},
       {"index": 1, "serverName": "Linux Proxy", "service": "", "protocol": "TCP", "port": "6160"}
     ],
-    "mappedPortsByProtocolInbound": [
-      {"index": 0, "serverName": "Linux Proxy", "service": "", "protocol": "TCP", "port": "6162, 2500 to 3300"}
-    ]
+    "mappedPortsByProtocolInbound": []
   }
 ]
 ```
@@ -231,11 +229,11 @@ Generate port mapping entries for Magic Ports frontend import. Same request body
 |-------|------|-------------|
 | `id` | `string` | Unique UUID for this server entry |
 | `sourceServer` | `string` | User-defined server name (from request) |
-| `totalMappedPorts` | `int` | Total outbound + inbound port mappings |
-| `totalMappedInboundPorts` | `int` | Count of inbound port mappings |
+| `totalMappedPorts` | `int` | Total outbound port mappings |
+| `totalMappedInboundPorts` | `int` | Always 0 (frontend computes inbound via cross-reference) |
 | `totalMappedServers` | `int` | Number of distinct peer servers |
-| `allInboundPortsTcp` / `allOutboundPortsTcp` | `string[]` | Deduplicated TCP port lists |
-| `allInboundPortsUdp` / `allOutboundPortsUdp` | `string[]` | Deduplicated UDP port lists |
+| `allInboundPortsTcp` / `allInboundPortsUdp` | `string[]` | Always `[]` (frontend computes inbound) |
+| `allOutboundPortsTcp` / `allOutboundPortsUdp` | `string[]` | Deduplicated outbound port lists |
 
 **`mappedPorts[]`** entries:
 
@@ -251,7 +249,7 @@ Generate port mapping entries for Magic Ports frontend import. Same request body
 | `port` | `string` | Port number or range |
 | `protocol` | `string` | "TCP", "UDP", "TCP, UDP", etc. |
 
-**`mappedPortsByProtocol[]`** and **`mappedPortsByProtocolInbound[]`** entries:
+**`mappedPortsByProtocol[]`** entries (outbound; `mappedPortsByProtocolInbound` is always `[]`):
 
 | Field | Type | Description |
 |-------|------|-------------|
