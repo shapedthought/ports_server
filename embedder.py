@@ -148,10 +148,12 @@ def _insert_embeddings(
 ) -> None:
     """Insert all embeddings into the port_embeddings virtual table."""
     cur = conn.cursor()
-    for row, emb in zip(rows, embeddings):
-        emb_bytes = np.asarray(emb, dtype=np.float32).tobytes()
-        cur.execute(
-            "INSERT INTO port_embeddings(enriched_rowid, embedding, product) VALUES (?, ?, ?)",
-            (row["rowid"], emb_bytes, row["product"]),
-        )
+    params = [
+        (row["rowid"], np.asarray(emb, dtype=np.float32).tobytes(), row["product"])
+        for row, emb in zip(rows, embeddings)
+    ]
+    cur.executemany(
+        "INSERT INTO port_embeddings(enriched_rowid, embedding, product) VALUES (?, ?, ?)",
+        params,
+    )
     log.info("Inserted %d embeddings", len(rows))

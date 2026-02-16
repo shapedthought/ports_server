@@ -5,6 +5,7 @@ import uuid
 import time
 from collections import defaultdict
 
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -72,21 +73,8 @@ try:
         _conn.execute(text("SELECT COUNT(*) FROM port_embeddings"))
     _vectors_available = True
     log.info("sqlite-vec loaded, vector search enabled")
-except Exception:
+except OperationalError:
     log.info("Vector search not available (sqlite-vec or port_embeddings missing), using keyword fallback")
-
-
-# Lazy singleton for embedding model (loaded on first semantic search request)
-_embedding_model = None
-
-
-def _get_embedding_model():
-    global _embedding_model
-    if _embedding_model is None:
-        from fastembed import TextEmbedding
-        _embedding_model = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
-        log.info("Loaded embedding model for semantic search")
-    return _embedding_model
 
 
 def clean_up_old_files(directory, min_age_minutes=1):
@@ -243,6 +231,27 @@ def _parse_roles(raw: str) -> list[str]:
         return []
 
 
+def _build_service_metas(row) -> tuple[ServiceMeta, ServiceMeta]:
+    """Build source and target ServiceMeta from an enriched_ports row."""
+    source_meta = ServiceMeta(
+        canonical=row["source_canonical"],
+        roles=_parse_roles(row["source_roles"]),
+        os=row["source_os"] or None,
+        hypervisor=row["source_hypervisor"] or None,
+        storage_type=row["source_storage_type"] or None,
+        original=row["sourceService"],
+    )
+    target_meta = ServiceMeta(
+        canonical=row["target_canonical"],
+        roles=_parse_roles(row["target_roles"]),
+        os=row["target_os"] or None,
+        hypervisor=row["target_hypervisor"] or None,
+        storage_type=row["target_storage_type"] or None,
+        original=row["targetService"],
+    )
+    return source_meta, target_meta
+
+
 @app.get("/products/{name}/enriched-ports", response_model=List[EnrichedPortResponse])
 async def get_enriched_ports(name: str):
     query = text("""
@@ -264,22 +273,7 @@ async def get_enriched_ports(name: str):
 
     results = []
     for row in rows:
-        source_meta = ServiceMeta(
-            canonical=row["source_canonical"],
-            roles=_parse_roles(row["source_roles"]),
-            os=row["source_os"] or None,
-            hypervisor=row["source_hypervisor"] or None,
-            storage_type=row["source_storage_type"] or None,
-            original=row["sourceService"],
-        )
-        target_meta = ServiceMeta(
-            canonical=row["target_canonical"],
-            roles=_parse_roles(row["target_roles"]),
-            os=row["target_os"] or None,
-            hypervisor=row["target_hypervisor"] or None,
-            storage_type=row["target_storage_type"] or None,
-            original=row["targetService"],
-        )
+        source_meta, target_meta = _build_service_metas(row)
         results.append(EnrichedPortResponse(
             subheading=row["subheading"],
             subheadingL2=row["subheadingL2"],
@@ -657,11 +651,9 @@ async def semantic_search(request: SemanticSearchRequest):
         return _keyword_fallback(request)
 
     try:
-        import numpy as np
+        from embedder import embed_query
 
-        model = _get_embedding_model()
-        query_embedding = list(model.embed([request.query]))[0]
-        query_bytes = np.asarray(query_embedding, dtype=np.float32).tobytes()
+        query_bytes = embed_query(request.query)
 
         with engine.connect() as conn:
             if request.product:
@@ -704,22 +696,7 @@ async def semantic_search(request: SemanticSearchRequest):
             distance = rowid_distance.get(row["rowid"], 1.0)
             similarity = 1.0 - distance
 
-            source_meta = ServiceMeta(
-                canonical=row["source_canonical"],
-                roles=_parse_roles(row["source_roles"]),
-                os=row["source_os"] or None,
-                hypervisor=row["source_hypervisor"] or None,
-                storage_type=row["source_storage_type"] or None,
-                original=row["sourceService"],
-            )
-            target_meta = ServiceMeta(
-                canonical=row["target_canonical"],
-                roles=_parse_roles(row["target_roles"]),
-                os=row["target_os"] or None,
-                hypervisor=row["target_hypervisor"] or None,
-                storage_type=row["target_storage_type"] or None,
-                original=row["targetService"],
-            )
+            source_meta, target_meta = _build_service_metas(row)
 
             results.append(SemanticSearchResult(
                 subheading=row["subheading"],
@@ -739,7 +716,7 @@ async def semantic_search(request: SemanticSearchRequest):
         results.sort(key=lambda r: r.similarity, reverse=True)
         return SemanticSearchResponse(results=results, query=request.query)
 
-    except Exception:
+    except (OperationalError, ValueError):
         log.exception("Vector search failed, falling back to keyword search")
         return _keyword_fallback(request)
 
@@ -766,22 +743,7 @@ def _keyword_fallback(request: SemanticSearchRequest) -> SemanticSearchResponse:
 
     results = []
     for row in rows:
-        source_meta = ServiceMeta(
-            canonical=row["source_canonical"],
-            roles=_parse_roles(row["source_roles"]),
-            os=row["source_os"] or None,
-            hypervisor=row["source_hypervisor"] or None,
-            storage_type=row["source_storage_type"] or None,
-            original=row["sourceService"],
-        )
-        target_meta = ServiceMeta(
-            canonical=row["target_canonical"],
-            roles=_parse_roles(row["target_roles"]),
-            os=row["target_os"] or None,
-            hypervisor=row["target_hypervisor"] or None,
-            storage_type=row["target_storage_type"] or None,
-            original=row["targetService"],
-        )
+        source_meta, target_meta = _build_service_metas(row)
         results.append(SemanticSearchResult(
             subheading=row["subheading"],
             subheadingL2=row["subheadingL2"],
