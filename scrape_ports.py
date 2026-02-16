@@ -195,6 +195,10 @@ def main():
         "--skip-graph", action="store_true",
         help="Skip graph construction (write only raw + enriched tables)",
     )
+    parser.add_argument(
+        "--skip-vectors", action="store_true",
+        help="Skip vector embedding generation",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -263,6 +267,11 @@ def main():
                 from graph_builder import build_graph
 
                 build_graph(conn)
+
+            if not args.skip_vectors:
+                from embedder import build_embeddings
+
+                build_embeddings(conn)
 
         conn.commit()
         conn.close()

@@ -5,11 +5,12 @@ import uuid
 import time
 from collections import defaultdict
 
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, MetaData, Table, select, distinct, or_, text
+from sqlalchemy import create_engine, event, MetaData, Table, select, distinct, or_, text
 from sqlalchemy.exc import OperationalError
 
 from typing import List
@@ -18,6 +19,9 @@ from models import (
     MappedPort,
     MappedPortByProtocol,
     PortResponse,
+    SemanticSearchRequest,
+    SemanticSearchResponse,
+    SemanticSearchResult,
     ServerTopology,
     ServiceMeta,
     TargetRequest,
@@ -45,8 +49,32 @@ app.add_middleware(
 # SQLAlchemy setup
 db_path = os.environ.get("DB_PATH", "allports_updated.db")
 engine = create_engine(f"sqlite:///{db_path}", future=True)
+
+# --- sqlite-vec extension loading (must be registered BEFORE any connections) ---
+_vectors_available = False
+try:
+    import sqlite_vec
+
+    @event.listens_for(engine, "connect")
+    def _load_sqlite_vec(dbapi_conn, connection_record):
+        dbapi_conn.enable_load_extension(True)
+        sqlite_vec.load(dbapi_conn)
+        dbapi_conn.enable_load_extension(False)
+except ImportError:
+    pass
+
+# Reflect tables (this opens a connection, which now has sqlite-vec loaded if available)
 metadata = MetaData()
 all_ports = Table("all_ports", metadata, autoload_with=engine)
+
+# Probe for vector table existence
+try:
+    with engine.connect() as _conn:
+        _conn.execute(text("SELECT COUNT(*) FROM port_embeddings"))
+    _vectors_available = True
+    log.info("sqlite-vec loaded, vector search enabled")
+except OperationalError:
+    log.info("Vector search not available (sqlite-vec or port_embeddings missing), using keyword fallback")
 
 
 def clean_up_old_files(directory, min_age_minutes=1):
@@ -195,6 +223,35 @@ async def get_product_subheadings(name: str) -> List[str]:
         return [row[0] for row in result]
 
 
+def _parse_roles(raw: str) -> list[str]:
+    """Parse a JSON-encoded list of roles, returning [] on failure."""
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _build_service_metas(row) -> tuple[ServiceMeta, ServiceMeta]:
+    """Build source and target ServiceMeta from an enriched_ports row."""
+    source_meta = ServiceMeta(
+        canonical=row["source_canonical"],
+        roles=_parse_roles(row["source_roles"]),
+        os=row["source_os"] or None,
+        hypervisor=row["source_hypervisor"] or None,
+        storage_type=row["source_storage_type"] or None,
+        original=row["sourceService"],
+    )
+    target_meta = ServiceMeta(
+        canonical=row["target_canonical"],
+        roles=_parse_roles(row["target_roles"]),
+        os=row["target_os"] or None,
+        hypervisor=row["target_hypervisor"] or None,
+        storage_type=row["target_storage_type"] or None,
+        original=row["targetService"],
+    )
+    return source_meta, target_meta
+
+
 @app.get("/products/{name}/enriched-ports", response_model=List[EnrichedPortResponse])
 async def get_enriched_ports(name: str):
     query = text("""
@@ -214,30 +271,9 @@ async def get_enriched_ports(name: str):
     if not rows:
         raise HTTPException(status_code=404, detail=f"No enriched data found for product '{name}'")
 
-    def _parse_roles(raw: str) -> list[str]:
-        try:
-            return json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return []
-
     results = []
     for row in rows:
-        source_meta = ServiceMeta(
-            canonical=row["source_canonical"],
-            roles=_parse_roles(row["source_roles"]),
-            os=row["source_os"] or None,
-            hypervisor=row["source_hypervisor"] or None,
-            storage_type=row["source_storage_type"] or None,
-            original=row["sourceService"],
-        )
-        target_meta = ServiceMeta(
-            canonical=row["target_canonical"],
-            roles=_parse_roles(row["target_roles"]),
-            os=row["target_os"] or None,
-            hypervisor=row["target_hypervisor"] or None,
-            storage_type=row["target_storage_type"] or None,
-            original=row["targetService"],
-        )
+        source_meta, target_meta = _build_service_metas(row)
         results.append(EnrichedPortResponse(
             subheading=row["subheading"],
             subheadingL2=row["subheadingL2"],
@@ -606,6 +642,124 @@ async def search_by_port(port: str):
     df = pd.read_sql(stmt, engine)
     records = df.to_dict("records")
     return [PortResponse(**record) for record in records]
+
+
+@app.post("/semantic-search", response_model=SemanticSearchResponse)
+async def semantic_search(request: SemanticSearchRequest):
+    """Semantic search over enriched port data using vector embeddings."""
+    if not _vectors_available:
+        return _keyword_fallback(request)
+
+    try:
+        from embedder import embed_query
+
+        query_bytes = embed_query(request.query)
+
+        with engine.connect() as conn:
+            if request.product:
+                vec_rows = conn.execute(
+                    text("""
+                        SELECT enriched_rowid, distance
+                        FROM port_embeddings
+                        WHERE embedding MATCH :q AND k = :limit AND product = :product
+                    """),
+                    {"q": query_bytes, "limit": request.limit, "product": request.product},
+                ).fetchall()
+            else:
+                vec_rows = conn.execute(
+                    text("""
+                        SELECT enriched_rowid, distance
+                        FROM port_embeddings
+                        WHERE embedding MATCH :q AND k = :limit
+                    """),
+                    {"q": query_bytes, "limit": request.limit},
+                ).fetchall()
+
+            if not vec_rows:
+                return SemanticSearchResponse(results=[], query=request.query)
+
+            rowid_distance = {row[0]: row[1] for row in vec_rows}
+            rowid_list = list(rowid_distance.keys())
+
+            placeholders = ",".join(f":r{i}" for i in range(len(rowid_list)))
+            params = {f"r{i}": rid for i, rid in enumerate(rowid_list)}
+            enriched_rows = conn.execute(
+                text(f"""
+                    SELECT rowid, * FROM enriched_ports
+                    WHERE rowid IN ({placeholders})
+                """),
+                params,
+            ).mappings().all()
+
+        results = []
+        for row in enriched_rows:
+            distance = rowid_distance.get(row["rowid"], 1.0)
+            similarity = 1.0 - distance
+
+            source_meta, target_meta = _build_service_metas(row)
+
+            results.append(SemanticSearchResult(
+                subheading=row["subheading"],
+                subheadingL2=row["subheadingL2"],
+                subheadingL3=row["subheadingL3"],
+                product=row["product"],
+                sourceService=row["sourceService"],
+                targetService=row["targetService"],
+                protocol=row["protocol"],
+                port=row["port"],
+                description=row["description"],
+                source_meta=source_meta,
+                target_meta=target_meta,
+                similarity=round(similarity, 4),
+            ))
+
+        results.sort(key=lambda r: r.similarity, reverse=True)
+        return SemanticSearchResponse(results=results, query=request.query)
+
+    except (OperationalError, ValueError):
+        log.exception("Vector search failed, falling back to keyword search")
+        return _keyword_fallback(request)
+
+
+def _keyword_fallback(request: SemanticSearchRequest) -> SemanticSearchResponse:
+    """Fall back to keyword search on enriched_ports when vectors are unavailable."""
+    pattern = f"%{request.query}%"
+
+    try:
+        with engine.connect() as conn:
+            query = text("""
+                SELECT * FROM enriched_ports
+                WHERE (sourceService LIKE :q OR targetService LIKE :q
+                       OR description LIKE :q OR port LIKE :q
+                       OR source_canonical LIKE :q OR target_canonical LIKE :q)
+                AND (:product IS NULL OR product = :product)
+                LIMIT :limit
+            """)
+            rows = conn.execute(
+                query, {"q": pattern, "product": request.product, "limit": request.limit}
+            ).mappings().all()
+    except OperationalError:
+        return SemanticSearchResponse(results=[], query=request.query, fallback=True)
+
+    results = []
+    for row in rows:
+        source_meta, target_meta = _build_service_metas(row)
+        results.append(SemanticSearchResult(
+            subheading=row["subheading"],
+            subheadingL2=row["subheadingL2"],
+            subheadingL3=row["subheadingL3"],
+            product=row["product"],
+            sourceService=row["sourceService"],
+            targetService=row["targetService"],
+            protocol=row["protocol"],
+            port=row["port"],
+            description=row["description"],
+            source_meta=source_meta,
+            target_meta=target_meta,
+            similarity=0.0,
+        ))
+
+    return SemanticSearchResponse(results=results, query=request.query, fallback=True)
 
 
 @app.post("/generateExcelWithUrl")
