@@ -666,12 +666,14 @@ def _load_excluded_connections(
     """Build a set of (src_id, tgt_id, port, protocol) tuples to exclude.
 
     Queries enriched_ports for rows matching excluded subsections, then maps
-    service names to component IDs.
+    service names to component IDs.  Connections that also appear in
+    non-excluded subsections are kept (not excluded).
     """
     placeholders = ", ".join(f":s{i}" for i in range(len(exclude_subsections)))
     params = {"p": product}
     params.update({f"s{i}": s for i, s in enumerate(exclude_subsections)})
 
+    # Rows IN the excluded subsections
     rows = conn.execute(
         text(f"""
             SELECT sourceService, targetService, port, protocol,
@@ -685,18 +687,55 @@ def _load_excluded_connections(
         params,
     ).fetchall()
 
-    excluded: set[tuple] = set()
+    # Rows NOT in the excluded subsections (same port/proto may appear elsewhere)
+    retained_rows = conn.execute(
+        text(f"""
+            SELECT source_canonical, source_os, source_hypervisor, source_storage_type,
+                   target_canonical, target_os, target_hypervisor, target_storage_type,
+                   port, protocol
+            FROM enriched_ports
+            WHERE product = :p AND NOT (subheading IN ({placeholders})
+                                        OR subheadingL2 IN ({placeholders})
+                                        OR subheadingL3 IN ({placeholders}))
+        """),
+        params,
+    ).fetchall()
+
     by_key = components["by_key"]
 
-    for row in rows:
-        src_key = (row[4], row[5] or None, row[6] or None, row[7] or None)
-        tgt_key = (row[8], row[9] or None, row[10] or None, row[11] or None)
+    def _resolve_conn_key(src_canon, src_os, src_hyp, src_stor,
+                          tgt_canon, tgt_os, tgt_hyp, tgt_stor,
+                          port, protocol):
+        src_canon = _SYNONYM_CANONICAL.get(src_canon, src_canon) if src_canon else src_canon
+        tgt_canon = _SYNONYM_CANONICAL.get(tgt_canon, tgt_canon) if tgt_canon else tgt_canon
+        src_key = (src_canon, src_os or None, src_hyp or None, src_stor or None)
+        tgt_key = (tgt_canon, tgt_os or None, tgt_hyp or None, tgt_stor or None)
         src_id = by_key.get(src_key)
         tgt_id = by_key.get(tgt_key)
         if src_id is not None and tgt_id is not None:
-            excluded.add((src_id, tgt_id, row[2], row[3]))
+            return (src_id, tgt_id, port, protocol)
+        return None
 
-    log.info("Exclusion filter: %d connection keys from %d enriched rows", len(excluded), len(rows))
+    # Build retained set — connections that exist outside excluded subsections
+    retained: set[tuple] = set()
+    for row in retained_rows:
+        key = _resolve_conn_key(row[0], row[1], row[2], row[3],
+                                row[4], row[5], row[6], row[7],
+                                row[8], row[9])
+        if key:
+            retained.add(key)
+
+    # Build excluded set, minus anything that also appears in retained sections
+    excluded: set[tuple] = set()
+    for row in rows:
+        key = _resolve_conn_key(row[4], row[5], row[6], row[7],
+                                row[8], row[9], row[10], row[11],
+                                row[2], row[3])
+        if key and key not in retained:
+            excluded.add(key)
+
+    log.info("Exclusion filter: %d connection keys from %d enriched rows (%d retained elsewhere)",
+             len(excluded), len(rows), len(retained))
     return excluded
 
 
@@ -765,16 +804,23 @@ def _resolve_service(
     # Priority 3: enrichment lookup (service name → canonical + qualifiers → component key)
     if service_name in enrichment_lookup:
         canonical, os_val, hyp, storage = enrichment_lookup[service_name]
+        canonical = _SYNONYM_CANONICAL.get(canonical, canonical)
         key = (canonical, os_val, hyp, storage)
         if key in components["by_key"]:
             return _expand_synonyms([components["by_key"][key]], components)
 
     # Priority 4: canonical name match — prefer fully-generic component
-    if lower in components["by_canonical"]:
-        generic_key = (lower, None, None, None)
-        if generic_key in components["by_key"]:
-            return _expand_synonyms([components["by_key"][generic_key]], components)
-        return _expand_synonyms(components["by_canonical"][lower], components)
+    # Also check synonym variants so "esxi server" finds "esxi host" components.
+    candidates = [lower]
+    synonym_of = _SYNONYM_CANONICAL.get(lower)
+    if synonym_of and synonym_of != lower:
+        candidates.append(synonym_of)
+    for candidate in candidates:
+        if candidate in components["by_canonical"]:
+            generic_key = (candidate, None, None, None)
+            if generic_key in components["by_key"]:
+                return _expand_synonyms([components["by_key"][generic_key]], components)
+            return _expand_synonyms(components["by_canonical"][candidate], components)
 
     # Priority 5: strip parenthetical suffix → retry canonical match
     stripped = _strip_parenthetical(service_name).lower()
@@ -787,6 +833,7 @@ def _resolve_service(
     # Priority 6: case-insensitive enrichment lookup
     if lower in enrichment_lookup_lower:
         canonical, os_val, hyp, storage = enrichment_lookup_lower[lower]
+        canonical = _SYNONYM_CANONICAL.get(canonical, canonical)
         key = (canonical, os_val, hyp, storage)
         if key in components["by_key"]:
             return _expand_synonyms([components["by_key"][key]], components)
