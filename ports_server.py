@@ -599,7 +599,7 @@ def _load_components(conn, product: str) -> dict:
         by_original[orig].append(cid)
         by_original_lower[orig.lower()].append(cid)
         by_key[(canonical, os_val, hyp, storage)] = cid
-        by_canonical[canonical].append(cid)
+        by_canonical[canonical.lower()].append(cid)
 
     return {
         "by_original": by_original,
@@ -734,7 +734,7 @@ def _expand_synonyms(component_ids: list[int], components: dict) -> list[int]:
         comp = components["all"].get(cid)
         if not comp:
             continue
-        canonical = comp["canonical"]
+        canonical = comp["canonical"].lower()
         for synonym in _SYNONYM_INDEX.get(canonical, set()):
             if synonym in components["by_canonical"]:
                 expanded.update(components["by_canonical"][synonym])
