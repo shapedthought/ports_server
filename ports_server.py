@@ -941,6 +941,24 @@ def _split_protocols(protocol: str) -> list[str]:
     return [p for p in parts if p in ("TCP", "UDP")]
 
 
+def _normalize_port_entries(ports: set[str]) -> list[str]:
+    """Split compound port strings and normalize formatting.
+
+    E.g. {"6162, 2500 to 3300", "443"} → ["443", "2500-3300", "6162"]
+    """
+    result: set[str] = set()
+    for p in ports:
+        # Split on comma
+        for part in p.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            # Normalize "X to Y" → "X-Y"
+            part = re.sub(r"(\d+)\s+to\s+(\d+)", r"\1-\2", part)
+            result.add(part)
+    return sorted(result)
+
+
 _CSV_COLUMNS = ["Source Server", "Target Server", "Source Service", "Target Service",
                 "Port", "Protocol", "Description"]
 
@@ -1014,14 +1032,15 @@ def _build_app_import_server(
 ) -> AppImportServer:
     """Build the app-import server response for a single server.
 
-    Only includes outbound entries (where this server hosts the source
-    component). The frontend derives inbound by cross-referencing all
-    servers' mappedPorts where targetServerName matches this server.
+    Includes outbound entries (where this server hosts the source
+    component) and computes inbound aggregates (where this server
+    hosts the target component and the source belongs to another server).
     """
     server_id = str(uuid.uuid4())
     mapped_ports: list[AppImportMappedPort] = []
     seen: set[tuple] = set()
 
+    # --- Outbound: this server hosts the source component ---
     for conn_row in connections:
         src_id = conn_row["source_component_id"]
         tgt_id = conn_row["target_component_id"]
@@ -1033,13 +1052,10 @@ def _build_app_import_server(
         source_canonical = all_components[src_id]["canonical"]
         target_canonical = all_components[tgt_id]["canonical"]
 
-        # Outbound only: this server hosts the source component
         if src_id in server_components:
             for peer_server in component_to_servers.get(tgt_id, []):
                 if peer_server == server_name and not include_loopback:
                     continue
-                # Use synonym-normalized canonical names for dedup so
-                # "ESXi server" / "ESXi host" collapse to one entry.
                 dedup_src = _SYNONYM_CANONICAL.get(source_canonical, source_canonical)
                 dedup_tgt = _SYNONYM_CANONICAL.get(target_canonical, target_canonical)
                 dedup_key = (server_name, peer_server, dedup_src,
@@ -1054,28 +1070,86 @@ def _build_app_import_server(
                         targetService=target_service,
                         description=description,
                         product=product,
-                        port=port, protocol=protocol,
+                        port=re.sub(r"(\d+)\s+to\s+(\d+)", r"\1-\2", port),
+                        protocol=protocol.upper(),
                     ))
 
-    # Aggregate outbound protocol lists
+    # --- Outbound aggregates ---
     outbound_tcp: set[str] = set()
     outbound_udp: set[str] = set()
-    outbound_by_sp: dict[tuple, set] = defaultdict(set)
+    outbound_by_sp: dict[tuple, set[str]] = defaultdict(set)
+    # Track target service per (serverName, port, protocol) for the service field
+    outbound_service: dict[tuple, str] = {}
 
     for mp in mapped_ports:
+        individual_ports = _normalize_port_entries({mp.port})
         for proto in _split_protocols(mp.protocol):
-            if proto == "TCP":
-                outbound_tcp.add(mp.port)
-            elif proto == "UDP":
-                outbound_udp.add(mp.port)
-            outbound_by_sp[(mp.targetServerName, proto)].add(mp.port)
+            for ip in individual_ports:
+                if proto == "TCP":
+                    outbound_tcp.add(ip)
+                elif proto == "UDP":
+                    outbound_udp.add(ip)
+                outbound_by_sp[(mp.targetServerName, proto)].add(ip)
+                outbound_service[(mp.targetServerName, proto, ip)] = mp.targetService
 
     mapped_by_protocol = []
     idx = 0
     for (server, proto), ports in sorted(outbound_by_sp.items()):
         for port in sorted(ports):
+            service = outbound_service.get((server, proto, port), "")
             mapped_by_protocol.append(AppImportPortByProtocol(
-                index=idx, serverName=server, service="",
+                index=idx, serverName=server, service=service,
+                protocol=proto, port=port,
+            ))
+            idx += 1
+
+    # --- Inbound: this server hosts the target component ---
+    inbound_tcp: set[str] = set()
+    inbound_udp: set[str] = set()
+    inbound_by_sp: dict[tuple, set[str]] = defaultdict(set)
+    inbound_service: dict[tuple, str] = {}
+    inbound_seen: set[tuple] = set()
+
+    for conn_row in connections:
+        src_id = conn_row["source_component_id"]
+        tgt_id = conn_row["target_component_id"]
+        port = conn_row["port"]
+        protocol = conn_row["protocol"]
+
+        if tgt_id not in server_components:
+            continue
+
+        for peer_server in component_to_servers.get(src_id, []):
+            if peer_server == server_name and not include_loopback:
+                continue
+
+            source_canonical = all_components[src_id]["canonical"]
+            target_canonical = all_components[tgt_id]["canonical"]
+            dedup_src = _SYNONYM_CANONICAL.get(source_canonical, source_canonical)
+            dedup_tgt = _SYNONYM_CANONICAL.get(target_canonical, target_canonical)
+            dedup_key = (peer_server, server_name, dedup_src, dedup_tgt, port, protocol)
+            if dedup_key in inbound_seen:
+                continue
+            inbound_seen.add(dedup_key)
+
+            source_service = all_components[src_id]["original_name"]
+            individual_ports = _normalize_port_entries({port})
+            for proto in _split_protocols(protocol):
+                for ip in individual_ports:
+                    if proto == "TCP":
+                        inbound_tcp.add(ip)
+                    elif proto == "UDP":
+                        inbound_udp.add(ip)
+                    inbound_by_sp[(peer_server, proto)].add(ip)
+                    inbound_service[(peer_server, proto, ip)] = source_service
+
+    mapped_by_protocol_inbound = []
+    idx = 0
+    for (server, proto), ports in sorted(inbound_by_sp.items()):
+        for port in sorted(ports):
+            service = inbound_service.get((server, proto, port), "")
+            mapped_by_protocol_inbound.append(AppImportPortByProtocol(
+                index=idx, serverName=server, service=service,
                 protocol=proto, port=port,
             ))
             idx += 1
@@ -1087,15 +1161,15 @@ def _build_app_import_server(
         id=server_id,
         sourceServer=server_name,
         totalMappedPorts=len(mapped_ports),
-        totalMappedInboundPorts=0,
+        totalMappedInboundPorts=len(inbound_seen),
         totalMappedServers=len(peer_servers),
         mappedPorts=mapped_ports,
-        allInboundPortsTcp=[],
-        allOutboundPortsTcp=sorted(outbound_tcp),
-        allInboundPortsUdp=[],
-        allOutboundPortsUdp=sorted(outbound_udp),
+        allInboundPortsTcp=_normalize_port_entries(inbound_tcp),
+        allOutboundPortsTcp=_normalize_port_entries(outbound_tcp),
+        allInboundPortsUdp=_normalize_port_entries(inbound_udp),
+        allOutboundPortsUdp=_normalize_port_entries(outbound_udp),
         mappedPortsByProtocol=mapped_by_protocol,
-        mappedPortsByProtocolInbound=[],
+        mappedPortsByProtocolInbound=mapped_by_protocol_inbound,
     )
 
 
