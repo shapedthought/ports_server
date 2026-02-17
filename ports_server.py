@@ -330,7 +330,7 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
                 )
 
             variants = _load_variants(conn, name)
-            enrichment_lookup = _load_enrichment_lookup(conn, name)
+            enrichment_lookup, enrichment_lookup_lower = _load_enrichment_lookup(conn, name)
             all_connections = _load_connections(conn, name)
             enrichment_version = _get_enrichment_version(conn, name)
     except OperationalError:
@@ -345,7 +345,7 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
     for server in request.servers:
         component_ids: set[int] = set()
         for service_name in server.services:
-            resolved = _resolve_service(service_name, components, enrichment_lookup)
+            resolved = _resolve_service(service_name, components, enrichment_lookup, enrichment_lookup_lower)
             if resolved:
                 component_ids.update(resolved)
             else:
@@ -357,7 +357,8 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
     for server_name, comp_ids in server_component_sets.items():
         expanded = set(comp_ids)
         for cid in comp_ids:
-            if cid in variants:            # specific → generic
+            # Expand each server's component set to include generic parents of specific variants.
+            if cid in variants:
                 expanded.add(variants[cid])
         server_component_sets[server_name] = expanded
 
@@ -375,8 +376,10 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
     for specific_id, generic_id in variants.items():
         reverse_variants[generic_id].append(specific_id)
 
-    # Inherit server assignments: specific variants inherit their generic parent's servers
-    # so that matched connections from specific components can find the peer server.
+    # Pre-populate server assignments for specific variants so that ancestry-matched
+    # connections can resolve peer servers.  This intentionally diverges from
+    # server_component_sets (which only contains directly-resolved + generic IDs);
+    # the sets are reconciled after connection matching below (lines 403-412).
     for generic_id, specific_ids in reverse_variants.items():
         if generic_id in component_to_servers:
             for specific_id in specific_ids:
@@ -529,8 +532,12 @@ def _load_variants(conn, product: str) -> dict[int, int]:
     return {row[0]: row[1] for row in rows}
 
 
-def _load_enrichment_lookup(conn, product: str) -> dict[str, tuple]:
-    """Map raw service names to (canonical, os, hypervisor, storage_type)."""
+def _load_enrichment_lookup(conn, product: str) -> tuple[dict[str, tuple], dict[str, tuple]]:
+    """Map raw service names to (canonical, os, hypervisor, storage_type).
+
+    Returns (exact_lookup, lower_lookup) where lower_lookup is a pre-built
+    case-insensitive version keyed on name.lower().
+    """
     rows = conn.execute(
         text("""
             SELECT DISTINCT sourceService, source_canonical, source_os, source_hypervisor, source_storage_type
@@ -543,16 +550,21 @@ def _load_enrichment_lookup(conn, product: str) -> dict[str, tuple]:
     ).fetchall()
 
     lookup: dict[str, tuple] = {}
+    lower_lookup: dict[str, tuple] = {}
     for row in rows:
         service_name = row[0]
         if service_name and service_name not in lookup:
-            lookup[service_name] = (
+            value = (
                 row[1],
                 row[2] or None,
                 row[3] or None,
                 row[4] or None,
             )
-    return lookup
+            lookup[service_name] = value
+            lower_key = service_name.lower()
+            if lower_key not in lower_lookup:
+                lower_lookup[lower_key] = value
+    return lookup, lower_lookup
 
 
 def _load_connections(conn, product: str) -> list[dict]:
@@ -600,6 +612,7 @@ def _resolve_service(
     service_name: str,
     components: dict,
     enrichment_lookup: dict[str, tuple],
+    enrichment_lookup_lower: dict[str, tuple],
 ) -> list[int]:
     """Resolve a user-provided service name to component IDs.
 
@@ -639,9 +652,8 @@ def _resolve_service(
         return _expand_synonyms(components["by_canonical"][stripped], components)
 
     # Priority 6: case-insensitive enrichment lookup
-    lower_enrichment = {k.lower(): v for k, v in enrichment_lookup.items()}
-    if lower in lower_enrichment:
-        canonical, os_val, hyp, storage = lower_enrichment[lower]
+    if lower in enrichment_lookup_lower:
+        canonical, os_val, hyp, storage = enrichment_lookup_lower[lower]
         key = (canonical, os_val, hyp, storage)
         if key in components["by_key"]:
             return _expand_synonyms([components["by_key"][key]], components)
