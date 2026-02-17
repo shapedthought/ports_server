@@ -69,6 +69,8 @@ class TopologyServer(BaseModel):
 class TopologyOptions(BaseModel):
     include_loopback: bool = False
     include_unresolved: bool = False
+    exclude_subsections: list[str] = Field(default_factory=list)
+    exclude_ports: list[str] = Field(default_factory=list)
 
 
 class TopologyRequest(BaseModel):
@@ -105,11 +107,18 @@ class ServerTopology(BaseModel):
     mappedPortsByProtocolInbound: list[MappedPortByProtocol]
 
 
+class UnresolvedServiceWarning(BaseModel):
+    service: str
+    server: str
+    suggestions: list[str] = Field(default_factory=list)
+
+
 class TopologyMetadata(BaseModel):
     total_entries_matched: int
     total_entries_skipped: int
     enrichment_version: str | None = None
     unresolved_services: list[str] = Field(default_factory=list)
+    warnings: list[UnresolvedServiceWarning] = Field(default_factory=list)
 
 
 class TopologyResponse(BaseModel):
@@ -154,6 +163,22 @@ class AppImportServer(BaseModel):
     allOutboundPortsUdp: list[str]
     mappedPortsByProtocol: list[AppImportPortByProtocol]
     mappedPortsByProtocolInbound: list[AppImportPortByProtocol]
+
+
+class AppImportResponse(BaseModel):
+    servers: list[AppImportServer]
+    warnings: list[UnresolvedServiceWarning] = Field(default_factory=list)
+
+
+# --- Service discovery models ---
+
+
+class ServiceInfo(BaseModel):
+    canonical: str
+    original_names: list[str]
+    os: list[str] = Field(default_factory=list)
+    hypervisor: list[str] = Field(default_factory=list)
+    storage_type: list[str] = Field(default_factory=list)
 
 
 # --- Semantic search models (Phase 3) ---

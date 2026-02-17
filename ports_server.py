@@ -1,3 +1,6 @@
+import csv
+import difflib
+import io
 import json
 import logging
 import os
@@ -15,9 +18,11 @@ from sqlalchemy import create_engine, event, MetaData, Table, select, distinct, 
 from sqlalchemy.exc import OperationalError
 
 from typing import List
+from fastapi.responses import Response
 from models import (
     AppImportMappedPort,
     AppImportPortByProtocol,
+    AppImportResponse,
     AppImportServer,
     EnrichedPortResponse,
     MappedPort,
@@ -27,11 +32,13 @@ from models import (
     SemanticSearchResponse,
     SemanticSearchResult,
     ServerTopology,
+    ServiceInfo,
     ServiceMeta,
     TargetRequest,
     TopologyMetadata,
     TopologyRequest,
     TopologyResponse,
+    UnresolvedServiceWarning,
     PortRequest,
     SourceRequest,
     SourceResponse,
@@ -247,6 +254,54 @@ async def get_product_subheadings(name: str) -> List[str]:
         return [row[0] for row in result]
 
 
+@app.get("/products/{name}/services", response_model=List[ServiceInfo])
+async def list_services(name: str):
+    """List all canonical service roles for a product with their variants."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT canonical, os, hypervisor, storage_type, original_name "
+                     "FROM components WHERE product = :p ORDER BY canonical"),
+                {"p": name},
+            ).mappings().all()
+    except OperationalError:
+        raise HTTPException(status_code=404, detail="Graph tables not found.")
+
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No services found for product '{name}'.")
+
+    grouped: dict[str, dict] = {}
+    for row in rows:
+        canonical = row["canonical"]
+        if canonical not in grouped:
+            grouped[canonical] = {
+                "original_names": set(),
+                "os": set(),
+                "hypervisor": set(),
+                "storage_type": set(),
+            }
+        g = grouped[canonical]
+        if row["original_name"]:
+            g["original_names"].add(row["original_name"])
+        if row["os"]:
+            g["os"].add(row["os"])
+        if row["hypervisor"]:
+            g["hypervisor"].add(row["hypervisor"])
+        if row["storage_type"]:
+            g["storage_type"].add(row["storage_type"])
+
+    return [
+        ServiceInfo(
+            canonical=canonical,
+            original_names=sorted(data["original_names"]),
+            os=sorted(data["os"]),
+            hypervisor=sorted(data["hypervisor"]),
+            storage_type=sorted(data["storage_type"]),
+        )
+        for canonical, data in sorted(grouped.items())
+    ]
+
+
 def _parse_roles(raw: str) -> list[str]:
     """Parse a JSON-encoded list of roles, returning [] on failure."""
     try:
@@ -320,6 +375,8 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
     Returns (components, server_component_sets, component_to_servers,
              matched_connections, all_connections, enrichment_version, unresolved).
     """
+    options = request.options
+
     try:
         with engine.connect() as conn:
             components = _load_components(conn, name)
@@ -333,6 +390,13 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
             enrichment_lookup, enrichment_lookup_lower = _load_enrichment_lookup(conn, name)
             all_connections = _load_connections(conn, name)
             enrichment_version = _get_enrichment_version(conn, name)
+
+            # Build subsection exclusion set if requested
+            excluded_conn_keys: set[tuple] = set()
+            if options.exclude_subsections:
+                excluded_conn_keys = _load_excluded_connections(
+                    conn, name, options.exclude_subsections, components,
+                )
     except OperationalError:
         raise HTTPException(
             status_code=404,
@@ -341,6 +405,10 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
 
     server_component_sets: dict[str, set[int]] = {}
     unresolved: list[str] = []
+    warnings: list[UnresolvedServiceWarning] = []
+
+    # Build candidate list for fuzzy matching once
+    fuzzy_candidates = list(components["by_original"].keys()) + list(components["by_canonical"].keys())
 
     for server in request.servers:
         component_ids: set[int] = set()
@@ -350,7 +418,12 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
                 component_ids.update(resolved)
             else:
                 unresolved.append(service_name)
-                log.warning("Could not resolve service '%s' for server '%s'", service_name, server.name)
+                suggestions = difflib.get_close_matches(service_name, fuzzy_candidates, n=3, cutoff=0.6)
+                warnings.append(UnresolvedServiceWarning(
+                    service=service_name, server=server.name, suggestions=suggestions,
+                ))
+                log.warning("Could not resolve service '%s' for server '%s' (suggestions: %s)",
+                            service_name, server.name, suggestions)
         server_component_sets[server.name] = component_ids
         log.info("Server '%s': resolved %d component(s) from %d service(s)", server.name, len(component_ids), len(server.services))
 
@@ -396,11 +469,20 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
         generic = variants.get(component_id)
         return generic is not None and generic in all_component_ids
 
+    exclude_ports_set = set(options.exclude_ports)
+
     matched_connections = []
     for conn_row in all_connections:
         src_id, tgt_id = conn_row["source_component_id"], conn_row["target_component_id"]
-        if _matches(src_id) and _matches(tgt_id):
-            matched_connections.append(conn_row)
+        if not (_matches(src_id) and _matches(tgt_id)):
+            continue
+        # Apply port exclusion filter
+        if conn_row["port"] in exclude_ports_set:
+            continue
+        # Apply subsection exclusion filter
+        if excluded_conn_keys and (src_id, tgt_id, conn_row["port"], conn_row["protocol"]) in excluded_conn_keys:
+            continue
+        matched_connections.append(conn_row)
 
     # Augment server component sets with the specific variant IDs that were
     # actually used in matched connections (targeted, not blanket expansion).
@@ -415,14 +497,14 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
                     all_component_ids.add(cid)
 
     return (components, server_component_sets, component_to_servers,
-            matched_connections, all_connections, enrichment_version, unresolved)
+            matched_connections, all_connections, enrichment_version, unresolved, warnings)
 
 
 @app.post("/products/{name}/topology", response_model=TopologyResponse)
-async def generate_topology(name: str, request: TopologyRequest):
+async def generate_topology(name: str, request: TopologyRequest, format: str = "json"):
     """Resolve server topology via knowledge graph traversal."""
     (components, server_component_sets, component_to_servers,
-     matched_connections, all_connections, enrichment_version, unresolved) = \
+     matched_connections, all_connections, enrichment_version, unresolved, warnings) = \
         _resolve_topology_graph(name, request)
 
     server_topologies = []
@@ -436,6 +518,16 @@ async def generate_topology(name: str, request: TopologyRequest):
         )
         server_topologies.append(topology)
 
+    log.info(
+        "Topology for '%s': %d connections matched, %d skipped, %d unresolved services",
+        name, len(matched_connections), len(all_connections) - len(matched_connections), len(unresolved),
+    )
+
+    if format == "csv":
+        return Response(content=_render_topology_csv(server_topologies), media_type="text/csv")
+    if format == "markdown":
+        return Response(content=_render_topology_markdown(server_topologies), media_type="text/markdown")
+
     total_product_connections = len(all_connections)
     total_matched = len(matched_connections)
     meta = TopologyMetadata(
@@ -443,21 +535,17 @@ async def generate_topology(name: str, request: TopologyRequest):
         total_entries_skipped=total_product_connections - total_matched,
         enrichment_version=enrichment_version,
         unresolved_services=unresolved if request.options.include_unresolved else [],
-    )
-
-    log.info(
-        "Topology for '%s': %d connections matched, %d skipped, %d unresolved services",
-        name, total_matched, total_product_connections - total_matched, len(unresolved),
+        warnings=warnings,
     )
 
     return TopologyResponse(product=name, servers=server_topologies, metadata=meta)
 
 
-@app.post("/products/{name}/app-import", response_model=List[AppImportServer])
-async def generate_app_import(name: str, request: TopologyRequest):
+@app.post("/products/{name}/app-import", response_model=AppImportResponse)
+async def generate_app_import(name: str, request: TopologyRequest, format: str = "json"):
     """Generate port mapping entries for Magic Ports frontend import."""
     (components, server_component_sets, component_to_servers,
-     matched_connections, all_connections, _, _) = \
+     matched_connections, all_connections, _, _, warnings) = \
         _resolve_topology_graph(name, request)
 
     servers = []
@@ -478,7 +566,12 @@ async def generate_app_import(name: str, request: TopologyRequest):
         name, len(servers), len(matched_connections),
     )
 
-    return servers
+    if format == "csv":
+        return Response(content=_render_app_import_csv(servers), media_type="text/csv")
+    if format == "markdown":
+        return Response(content=_render_app_import_markdown(servers), media_type="text/markdown")
+
+    return AppImportResponse(servers=servers, warnings=warnings)
 
 
 def _load_components(conn, product: str) -> dict:
@@ -565,6 +658,46 @@ def _load_enrichment_lookup(conn, product: str) -> tuple[dict[str, tuple], dict[
             if lower_key not in lower_lookup:
                 lower_lookup[lower_key] = value
     return lookup, lower_lookup
+
+
+def _load_excluded_connections(
+    conn, product: str, exclude_subsections: list[str], components: dict,
+) -> set[tuple]:
+    """Build a set of (src_id, tgt_id, port, protocol) tuples to exclude.
+
+    Queries enriched_ports for rows matching excluded subsections, then maps
+    service names to component IDs.
+    """
+    placeholders = ", ".join(f":s{i}" for i in range(len(exclude_subsections)))
+    params = {"p": product}
+    params.update({f"s{i}": s for i, s in enumerate(exclude_subsections)})
+
+    rows = conn.execute(
+        text(f"""
+            SELECT sourceService, targetService, port, protocol,
+                   source_canonical, source_os, source_hypervisor, source_storage_type,
+                   target_canonical, target_os, target_hypervisor, target_storage_type
+            FROM enriched_ports
+            WHERE product = :p AND (subheading IN ({placeholders})
+                                    OR subheadingL2 IN ({placeholders})
+                                    OR subheadingL3 IN ({placeholders}))
+        """),
+        params,
+    ).fetchall()
+
+    excluded: set[tuple] = set()
+    by_key = components["by_key"]
+
+    for row in rows:
+        src_key = (row[4], row[5] or None, row[6] or None, row[7] or None)
+        tgt_key = (row[8], row[9] or None, row[10] or None, row[11] or None)
+        src_id = by_key.get(src_key)
+        tgt_id = by_key.get(tgt_key)
+        if src_id is not None and tgt_id is not None:
+            excluded.add((src_id, tgt_id, row[2], row[3]))
+
+    log.info("Exclusion filter: %d connection keys from %d enriched rows", len(excluded), len(rows))
+    return excluded
 
 
 def _load_connections(conn, product: str) -> list[dict]:
@@ -759,6 +892,68 @@ def _split_protocols(protocol: str) -> list[str]:
     """Split a protocol string like 'TCP, UDP' into individual protocols."""
     parts = [p.strip().upper() for p in protocol.replace("/", ",").split(",")]
     return [p for p in parts if p in ("TCP", "UDP")]
+
+
+_CSV_COLUMNS = ["Source Server", "Target Server", "Source Service", "Target Service",
+                "Port", "Protocol", "Description"]
+
+
+def _render_topology_csv(servers: list[ServerTopology]) -> str:
+    """Render topology results as CSV."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_CSV_COLUMNS)
+    for srv in servers:
+        for mp in srv.mappedPorts:
+            writer.writerow([
+                srv.sourceServer, mp.server, "", "",
+                mp.port, mp.protocol, mp.description,
+            ])
+    return buf.getvalue()
+
+
+def _render_app_import_csv(servers: list[AppImportServer]) -> str:
+    """Render app-import results as CSV."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_CSV_COLUMNS)
+    for srv in servers:
+        for mp in srv.mappedPorts:
+            writer.writerow([
+                mp.sourceServerName, mp.targetServerName,
+                mp.sourceService, mp.targetService,
+                mp.port, mp.protocol, mp.description,
+            ])
+    return buf.getvalue()
+
+
+def _render_topology_markdown(servers: list[ServerTopology]) -> str:
+    """Render topology results as a markdown table."""
+    lines = [
+        "| Source Server | Target Server | Port | Protocol | Direction | Description |",
+        "|---|---|---|---|---|---|",
+    ]
+    for srv in servers:
+        for mp in srv.mappedPorts:
+            desc = mp.description.replace("|", "\\|")[:80]
+            lines.append(f"| {srv.sourceServer} | {mp.server} | {mp.port} | {mp.protocol} | {mp.direction} | {desc} |")
+    return "\n".join(lines)
+
+
+def _render_app_import_markdown(servers: list[AppImportServer]) -> str:
+    """Render app-import results as a markdown table."""
+    lines = [
+        "| Source Server | Target Server | Source Service | Target Service | Port | Protocol | Description |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for srv in servers:
+        for mp in srv.mappedPorts:
+            desc = mp.description.replace("|", "\\|")[:80]
+            lines.append(
+                f"| {mp.sourceServerName} | {mp.targetServerName} | {mp.sourceService} "
+                f"| {mp.targetService} | {mp.port} | {mp.protocol} | {desc} |"
+            )
+    return "\n".join(lines)
 
 
 def _build_app_import_server(
