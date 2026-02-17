@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import uuid
 import time
 from collections import defaultdict
@@ -37,6 +38,23 @@ from models import (
 )
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Role synonym resolution
+# ---------------------------------------------------------------------------
+# Each set groups canonical names that refer to the same logical component.
+# All values must be lowercase.
+ROLE_SYNONYM_GROUPS: list[set[str]] = [
+    {"esxi server", "esxi host"},
+]
+
+_SYNONYM_INDEX: dict[str, set[str]] = {}
+_SYNONYM_CANONICAL: dict[str, str] = {}  # maps each name → deterministic representative
+for _group in ROLE_SYNONYM_GROUPS:
+    _representative = min(_group)  # alphabetically first for stability
+    for _name in _group:
+        _SYNONYM_INDEX[_name] = _group - {_name}
+        _SYNONYM_CANONICAL[_name] = _representative
 
 app = FastAPI()
 
@@ -312,7 +330,7 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
                 )
 
             variants = _load_variants(conn, name)
-            enrichment_lookup = _load_enrichment_lookup(conn, name)
+            enrichment_lookup, enrichment_lookup_lower = _load_enrichment_lookup(conn, name)
             all_connections = _load_connections(conn, name)
             enrichment_version = _get_enrichment_version(conn, name)
     except OperationalError:
@@ -327,7 +345,7 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
     for server in request.servers:
         component_ids: set[int] = set()
         for service_name in server.services:
-            resolved = _resolve_service(service_name, components, enrichment_lookup)
+            resolved = _resolve_service(service_name, components, enrichment_lookup, enrichment_lookup_lower)
             if resolved:
                 component_ids.update(resolved)
             else:
@@ -339,6 +357,7 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
     for server_name, comp_ids in server_component_sets.items():
         expanded = set(comp_ids)
         for cid in comp_ids:
+            # Expand each server's component set to include generic parents of specific variants.
             if cid in variants:
                 expanded.add(variants[cid])
         server_component_sets[server_name] = expanded
@@ -352,11 +371,48 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
     for comp_ids in server_component_sets.values():
         all_component_ids.update(comp_ids)
 
+    # Build reverse variant index for server lookup: generic_id → [specific_ids]
+    reverse_variants: dict[int, list[int]] = defaultdict(list)
+    for specific_id, generic_id in variants.items():
+        reverse_variants[generic_id].append(specific_id)
+
+    # Pre-populate server assignments for specific variants so that ancestry-matched
+    # connections can resolve peer servers.  This intentionally diverges from
+    # server_component_sets (which only contains directly-resolved + generic IDs);
+    # the sets are reconciled after connection matching below (lines 403-412).
+    for generic_id, specific_ids in reverse_variants.items():
+        if generic_id in component_to_servers:
+            for specific_id in specific_ids:
+                if specific_id not in component_to_servers:
+                    component_to_servers[specific_id] = component_to_servers[generic_id]
+
+    # Match connections using variant ancestry: a connection endpoint matches
+    # if the component itself OR its generic parent is in the resolved set.
+    # This lets "Backup proxy" (generic) match connections from
+    # "Backup proxy (Linux)" without pulling in Windows/Hyper-V variants.
+    def _matches(component_id: int) -> bool:
+        if component_id in all_component_ids:
+            return True
+        generic = variants.get(component_id)
+        return generic is not None and generic in all_component_ids
+
     matched_connections = []
     for conn_row in all_connections:
         src_id, tgt_id = conn_row["source_component_id"], conn_row["target_component_id"]
-        if src_id in all_component_ids and tgt_id in all_component_ids:
+        if _matches(src_id) and _matches(tgt_id):
             matched_connections.append(conn_row)
+
+    # Augment server component sets with the specific variant IDs that were
+    # actually used in matched connections (targeted, not blanket expansion).
+    for conn_row in matched_connections:
+        for cid in (conn_row["source_component_id"], conn_row["target_component_id"]):
+            if cid not in all_component_ids:
+                generic = variants.get(cid)
+                if generic and generic in all_component_ids:
+                    for sname, comp_ids in server_component_sets.items():
+                        if generic in comp_ids:
+                            comp_ids.add(cid)
+                    all_component_ids.add(cid)
 
     return (components, server_component_sets, component_to_servers,
             matched_connections, all_connections, enrichment_version, unresolved)
@@ -476,8 +532,12 @@ def _load_variants(conn, product: str) -> dict[int, int]:
     return {row[0]: row[1] for row in rows}
 
 
-def _load_enrichment_lookup(conn, product: str) -> dict[str, tuple]:
-    """Map raw service names to (canonical, os, hypervisor, storage_type)."""
+def _load_enrichment_lookup(conn, product: str) -> tuple[dict[str, tuple], dict[str, tuple]]:
+    """Map raw service names to (canonical, os, hypervisor, storage_type).
+
+    Returns (exact_lookup, lower_lookup) where lower_lookup is a pre-built
+    case-insensitive version keyed on name.lower().
+    """
     rows = conn.execute(
         text("""
             SELECT DISTINCT sourceService, source_canonical, source_os, source_hypervisor, source_storage_type
@@ -490,16 +550,21 @@ def _load_enrichment_lookup(conn, product: str) -> dict[str, tuple]:
     ).fetchall()
 
     lookup: dict[str, tuple] = {}
+    lower_lookup: dict[str, tuple] = {}
     for row in rows:
         service_name = row[0]
         if service_name and service_name not in lookup:
-            lookup[service_name] = (
+            value = (
                 row[1],
                 row[2] or None,
                 row[3] or None,
                 row[4] or None,
             )
-    return lookup
+            lookup[service_name] = value
+            lower_key = service_name.lower()
+            if lower_key not in lower_lookup:
+                lower_lookup[lower_key] = value
+    return lookup, lower_lookup
 
 
 def _load_connections(conn, product: str) -> list[dict]:
@@ -524,37 +589,74 @@ def _get_enrichment_version(conn, product: str) -> str | None:
     return row[0] if row else None
 
 
+def _strip_parenthetical(name: str) -> str:
+    """Strip trailing parenthetical qualifier: 'Backup proxy (Linux)' → 'Backup proxy'."""
+    return re.sub(r"\s*\(.*?\)\s*$", "", name).strip()
+
+
+def _expand_synonyms(component_ids: list[int], components: dict) -> list[int]:
+    """Expand component IDs to include IDs for any known synonym canonicals."""
+    expanded = set(component_ids)
+    for cid in component_ids:
+        comp = components["all"].get(cid)
+        if not comp:
+            continue
+        canonical = comp["canonical"]
+        for synonym in _SYNONYM_INDEX.get(canonical, set()):
+            if synonym in components["by_canonical"]:
+                expanded.update(components["by_canonical"][synonym])
+    return list(expanded)
+
+
 def _resolve_service(
     service_name: str,
     components: dict,
     enrichment_lookup: dict[str, tuple],
+    enrichment_lookup_lower: dict[str, tuple],
 ) -> list[int]:
     """Resolve a user-provided service name to component IDs.
 
-    Priority: exact original_name → case-insensitive original → enrichment lookup → canonical match.
+    Priority: exact original_name → case-insensitive original → enrichment lookup
+    → canonical match → parenthetical-stripped canonical → case-insensitive enrichment.
+    All results are expanded with known synonym component IDs.
     """
     # Priority 1: exact match on original_name
     if service_name in components["by_original"]:
-        return components["by_original"][service_name]
+        return _expand_synonyms(components["by_original"][service_name], components)
 
     # Priority 2: case-insensitive match on original_name
     lower = service_name.lower()
     if lower in components["by_original_lower"]:
-        return components["by_original_lower"][lower]
+        return _expand_synonyms(components["by_original_lower"][lower], components)
 
     # Priority 3: enrichment lookup (service name → canonical + qualifiers → component key)
     if service_name in enrichment_lookup:
         canonical, os_val, hyp, storage = enrichment_lookup[service_name]
         key = (canonical, os_val, hyp, storage)
         if key in components["by_key"]:
-            return [components["by_key"][key]]
+            return _expand_synonyms([components["by_key"][key]], components)
 
-    # Priority 4: canonical name match — prefer fully-generic component to avoid variant cross-contamination
+    # Priority 4: canonical name match — prefer fully-generic component
     if lower in components["by_canonical"]:
         generic_key = (lower, None, None, None)
         if generic_key in components["by_key"]:
-            return [components["by_key"][generic_key]]
-        return components["by_canonical"][lower]
+            return _expand_synonyms([components["by_key"][generic_key]], components)
+        return _expand_synonyms(components["by_canonical"][lower], components)
+
+    # Priority 5: strip parenthetical suffix → retry canonical match
+    stripped = _strip_parenthetical(service_name).lower()
+    if stripped != lower and stripped in components["by_canonical"]:
+        generic_key = (stripped, None, None, None)
+        if generic_key in components["by_key"]:
+            return _expand_synonyms([components["by_key"][generic_key]], components)
+        return _expand_synonyms(components["by_canonical"][stripped], components)
+
+    # Priority 6: case-insensitive enrichment lookup
+    if lower in enrichment_lookup_lower:
+        canonical, os_val, hyp, storage = enrichment_lookup_lower[lower]
+        key = (canonical, os_val, hyp, storage)
+        if key in components["by_key"]:
+            return _expand_synonyms([components["by_key"][key]], components)
 
     return []
 
@@ -686,14 +788,20 @@ def _build_app_import_server(
         description = conn_row["description"] or ""
         source_service = all_components[src_id]["original_name"]
         target_service = all_components[tgt_id]["original_name"]
+        source_canonical = all_components[src_id]["canonical"]
+        target_canonical = all_components[tgt_id]["canonical"]
 
         # Outbound only: this server hosts the source component
         if src_id in server_components:
             for peer_server in component_to_servers.get(tgt_id, []):
                 if peer_server == server_name and not include_loopback:
                     continue
-                dedup_key = (server_name, peer_server, source_service,
-                             target_service, port, protocol)
+                # Use synonym-normalized canonical names for dedup so
+                # "ESXi server" / "ESXi host" collapse to one entry.
+                dedup_src = _SYNONYM_CANONICAL.get(source_canonical, source_canonical)
+                dedup_tgt = _SYNONYM_CANONICAL.get(target_canonical, target_canonical)
+                dedup_key = (server_name, peer_server, dedup_src,
+                             dedup_tgt, port, protocol)
                 if dedup_key not in seen:
                     seen.add(dedup_key)
                     mapped_ports.append(AppImportMappedPort(
