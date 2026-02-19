@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: ports-backend
-        image: txtxx56/ports_server:0.92
+        image: txtxx56/ports_server:1.0
         ports:
         - containerPort: 8001
         env:
