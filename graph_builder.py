@@ -11,23 +11,9 @@ import logging
 import sqlite3
 import time
 
+from synonyms import SYNONYM_CANONICAL as _SYNONYM_CANONICAL
+
 log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Synonym normalization — merge equivalent canonical names at graph build time.
-# Each set groups canonical names that refer to the same logical component.
-# The alphabetically-first name becomes the canonical representative.
-# Must stay in sync with ROLE_SYNONYM_GROUPS in ports_server.py.
-# ---------------------------------------------------------------------------
-ROLE_SYNONYM_GROUPS: list[set[str]] = [
-    {"esxi server", "esxi host"},
-]
-
-_SYNONYM_CANONICAL: dict[str, str] = {}
-for _group in ROLE_SYNONYM_GROUPS:
-    _representative = min(_group)
-    for _name in _group:
-        _SYNONYM_CANONICAL[_name] = _representative
 
 
 def _normalize_canonical(name: str) -> str:

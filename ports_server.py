@@ -44,24 +44,9 @@ from models import (
     SourceResponse,
 )
 
+from synonyms import SYNONYM_INDEX as _SYNONYM_INDEX, SYNONYM_CANONICAL as _SYNONYM_CANONICAL
+
 log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Role synonym resolution
-# ---------------------------------------------------------------------------
-# Each set groups canonical names that refer to the same logical component.
-# All values must be lowercase.
-ROLE_SYNONYM_GROUPS: list[set[str]] = [
-    {"esxi server", "esxi host"},
-]
-
-_SYNONYM_INDEX: dict[str, set[str]] = {}
-_SYNONYM_CANONICAL: dict[str, str] = {}  # maps each name → deterministic representative
-for _group in ROLE_SYNONYM_GROUPS:
-    _representative = min(_group)  # alphabetically first for stability
-    for _name in _group:
-        _SYNONYM_INDEX[_name] = _group - {_name}
-        _SYNONYM_CANONICAL[_name] = _representative
 
 app = FastAPI()
 
@@ -500,7 +485,11 @@ def _resolve_topology_graph(name: str, request: TopologyRequest):
             matched_connections, all_connections, enrichment_version, unresolved, warnings)
 
 
-@app.post("/products/{name}/topology", response_model=TopologyResponse)
+@app.post(
+    "/products/{name}/topology",
+    response_model=TopologyResponse,
+    responses={200: {"content": {"text/csv": {}, "text/markdown": {}}}},
+)
 async def generate_topology(name: str, request: TopologyRequest, format: str = "json"):
     """Resolve server topology via knowledge graph traversal."""
     (components, server_component_sets, component_to_servers,
@@ -541,7 +530,11 @@ async def generate_topology(name: str, request: TopologyRequest, format: str = "
     return TopologyResponse(product=name, servers=server_topologies, metadata=meta)
 
 
-@app.post("/products/{name}/app-import", response_model=AppImportResponse)
+@app.post(
+    "/products/{name}/app-import",
+    response_model=AppImportResponse,
+    responses={200: {"content": {"text/csv": {}, "text/markdown": {}}}},
+)
 async def generate_app_import(name: str, request: TopologyRequest, format: str = "json"):
     """Generate port mapping entries for Magic Ports frontend import."""
     (components, server_component_sets, component_to_servers,
@@ -1078,7 +1071,8 @@ def _build_app_import_server(
     outbound_tcp: set[str] = set()
     outbound_udp: set[str] = set()
     outbound_by_sp: dict[tuple, set[str]] = defaultdict(set)
-    # Track target service per (serverName, port, protocol) for the service field
+    # Track target service per (serverName, port, protocol) for the service field.
+    # Use setdefault to keep the first service seen per key (stable, not overwritten).
     outbound_service: dict[tuple, str] = {}
 
     for mp in mapped_ports:
@@ -1090,7 +1084,7 @@ def _build_app_import_server(
                 elif proto == "UDP":
                     outbound_udp.add(ip)
                 outbound_by_sp[(mp.targetServerName, proto)].add(ip)
-                outbound_service[(mp.targetServerName, proto, ip)] = mp.targetService
+                outbound_service.setdefault((mp.targetServerName, proto, ip), mp.targetService)
 
     mapped_by_protocol = []
     idx = 0
@@ -1141,7 +1135,7 @@ def _build_app_import_server(
                     elif proto == "UDP":
                         inbound_udp.add(ip)
                     inbound_by_sp[(peer_server, proto)].add(ip)
-                    inbound_service[(peer_server, proto, ip)] = source_service
+                    inbound_service.setdefault((peer_server, proto, ip), source_service)
 
     mapped_by_protocol_inbound = []
     idx = 0
@@ -1154,15 +1148,18 @@ def _build_app_import_server(
             ))
             idx += 1
 
-    peer_servers = set(mp.targetServerName for mp in mapped_ports
-                       if mp.targetServerName != server_name)
+    # Count all distinct peer servers (both outbound targets and inbound sources)
+    outbound_peers = set(mp.targetServerName for mp in mapped_ports
+                         if mp.targetServerName != server_name)
+    inbound_peers = set(key[0] for key in inbound_seen if key[0] != server_name)
+    all_peers = outbound_peers | inbound_peers
 
     return AppImportServer(
         id=server_id,
         sourceServer=server_name,
         totalMappedPorts=len(mapped_ports),
         totalMappedInboundPorts=len(inbound_seen),
-        totalMappedServers=len(peer_servers),
+        totalMappedServers=len(all_peers),
         mappedPorts=mapped_ports,
         allInboundPortsTcp=_normalize_port_entries(inbound_tcp),
         allOutboundPortsTcp=_normalize_port_entries(outbound_tcp),
