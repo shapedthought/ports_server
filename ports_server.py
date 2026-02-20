@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, event, MetaData, Table, select, distinct, or_, text
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.pool import NullPool
 
 from typing import List
 from fastapi.responses import Response
@@ -61,7 +62,7 @@ app.add_middleware(
 
 # SQLAlchemy setup
 db_path = os.environ.get("DB_PATH", "allports_updated.db")
-engine = create_engine(f"sqlite:///{db_path}", future=True)
+engine = create_engine(f"sqlite:///{db_path}", future=True, poolclass=NullPool)
 
 # --- sqlite-vec extension loading (must be registered BEFORE any connections) ---
 _vectors_available = False
