@@ -16,7 +16,7 @@ spec:
           containers:
           - name: scraper
             image: txtxx56/ports_server:1.0
-            command: ["python", "scrape_ports.py"]
+            command: ["python", "scrape_ports.py", "--skip-vectors"]
             env:
             - name: DB_PATH
               value: "/data/allports_updated.db"
