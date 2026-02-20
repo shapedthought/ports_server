@@ -11,7 +11,14 @@ import logging
 import sqlite3
 import time
 
+from synonyms import SYNONYM_CANONICAL as _SYNONYM_CANONICAL
+
 log = logging.getLogger(__name__)
+
+
+def _normalize_canonical(name: str) -> str:
+    """Map synonym canonical names to a single representative."""
+    return _SYNONYM_CANONICAL.get(name.lower(), name)
 
 
 def build_graph(conn: sqlite3.Connection) -> None:
@@ -103,8 +110,10 @@ def _extract_components(cur: sqlite3.Cursor) -> dict[tuple, int]:
     target_rows = cur.fetchall()
 
     # Deduplicate: keep first original_name per (product, canonical, os, hyp, storage)
+    # Normalize synonyms so e.g. "esxi server" and "esxi host" merge into one component.
     seen: dict[tuple, str] = {}  # key -> first original_name
     for product, canonical, os_val, hyp, storage, original in source_rows + target_rows:
+        canonical = _normalize_canonical(canonical)
         key = (product, canonical, _normalize_null(os_val), _normalize_null(hyp), _normalize_null(storage))
         if key not in seen:
             seen[key] = original
@@ -153,6 +162,8 @@ def _extract_connections(cur: sqlite3.Cursor, component_lookup: dict[tuple, int]
          t_canon, t_os, t_hyp, t_storage,
          port, protocol, description) = row
 
+        s_canon = _normalize_canonical(s_canon)
+        t_canon = _normalize_canonical(t_canon)
         source_key = (product, s_canon, _normalize_null(s_os), _normalize_null(s_hyp), _normalize_null(s_storage))
         target_key = (product, t_canon, _normalize_null(t_os), _normalize_null(t_hyp), _normalize_null(t_storage))
 

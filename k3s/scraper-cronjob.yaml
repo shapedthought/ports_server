@@ -15,7 +15,7 @@ spec:
         spec:
           containers:
           - name: scraper
-            image: txtxx56/ports_server:0.92
+            image: txtxx56/ports_server:1.0
             command: ["python", "scrape_ports.py"]
             env:
             - name: DB_PATH
