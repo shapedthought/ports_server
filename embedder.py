@@ -1,40 +1,100 @@
 """
 Generate and store vector embeddings for enriched port data.
 
-Reads enriched_ports, generates embeddings using fastembed (ONNX Runtime),
-and stores them in a sqlite-vec virtual table for semantic search.
+Uses Voyage AI HTTP embeddings (voyage-4-lite @ 512 dims by default) so the
+VPS never runs a local ONNX model. Index builds use input_type=document;
+query embeds use input_type=query. Stores vectors in a sqlite-vec virtual
+table for semantic search.
 """
 
+from __future__ import annotations
+
 import logging
+import os
 import sqlite3
 import time
+from datetime import datetime, timezone
 
 import numpy as np
+import requests
 
 log = logging.getLogger(__name__)
 
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-EMBEDDING_DIM = 384
+VOYAGE_API_URL = "https://api.voyageai.com/v1/embeddings"
+DEFAULT_MODEL = "voyage-4-lite"
+DEFAULT_DIMENSIONS = 512
+BATCH_SIZE = 128  # Voyage allows up to 1000 inputs per request
 
-# Lazy singleton for the embedding model
-_model = None
+MODEL_NAME = os.environ.get("VOYAGE_MODEL", DEFAULT_MODEL)
+EMBEDDING_DIM = int(os.environ.get("VOYAGE_DIMENSIONS", str(DEFAULT_DIMENSIONS)))
 
 
-def _get_model():
-    """Get or create the fastembed TextEmbedding model (cached)."""
-    global _model
-    if _model is None:
-        from fastembed import TextEmbedding
+def _require_api_key() -> str:
+    key = os.environ.get("VOYAGE_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError(
+            "VOYAGE_API_KEY is required for Voyage embeddings. "
+            "Set the env var or use keyword fallback / --skip-vectors."
+        )
+    return key
 
-        _model = TextEmbedding(model_name=MODEL_NAME)
-        log.info("Loaded embedding model: %s", MODEL_NAME)
-    return _model
+
+def _embed_texts(texts: list[str], input_type: str) -> list[np.ndarray]:
+    """Embed texts via Voyage AI HTTP API. Returns list of float32 ndarrays."""
+    if not texts:
+        return []
+
+    api_key = _require_api_key()
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    all_embeddings: list[np.ndarray] = []
+    for start in range(0, len(texts), BATCH_SIZE):
+        batch = texts[start : start + BATCH_SIZE]
+        payload = {
+            "input": batch,
+            "model": MODEL_NAME,
+            "input_type": input_type,
+            "output_dimension": EMBEDDING_DIM,
+        }
+        resp = requests.post(VOYAGE_API_URL, headers=headers, json=payload, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Voyage returns data sorted by index; sort defensively anyway.
+        items = sorted(data["data"], key=lambda d: d["index"])
+        if len(items) != len(batch):
+            raise RuntimeError(
+                f"Voyage returned {len(items)} embeddings for {len(batch)} inputs"
+            )
+        for item in items:
+            vec = np.asarray(item["embedding"], dtype=np.float32)
+            if vec.shape != (EMBEDDING_DIM,):
+                raise RuntimeError(
+                    f"Expected embedding dim {EMBEDDING_DIM}, got {vec.shape}"
+                )
+            all_embeddings.append(vec)
+
+        log.info(
+            "Embedded batch %d-%d / %d (model=%s, dims=%d, input_type=%s)",
+            start + 1,
+            start + len(batch),
+            len(texts),
+            MODEL_NAME,
+            EMBEDDING_DIM,
+            input_type,
+        )
+
+    return all_embeddings
 
 
 def build_embeddings(conn: sqlite3.Connection) -> None:
     """Build vector embeddings from enriched_ports data.
 
     Called from scrape_ports.py after graph construction, before commit.
+    Uses Voyage input_type=document.
     """
     start = time.monotonic()
 
@@ -47,24 +107,34 @@ def build_embeddings(conn: sqlite3.Connection) -> None:
         return
 
     texts = [_build_embedding_text(row) for row in rows]
-    log.info("Generating embeddings for %d rows...", len(texts))
+    log.info(
+        "Generating Voyage embeddings for %d rows (model=%s, dims=%d)...",
+        len(texts),
+        MODEL_NAME,
+        EMBEDDING_DIM,
+    )
 
-    model = _get_model()
-    embeddings = list(model.embed(texts))
-
+    embeddings = _embed_texts(texts, input_type="document")
     _insert_embeddings(conn, rows, embeddings)
+    _write_embeddings_meta(conn)
 
     elapsed = time.monotonic() - start
-    log.info("Embeddings built in %.2fs", elapsed)
+    log.info(
+        "Embeddings built in %.2fs (model=%s, dims=%d, count=%d)",
+        elapsed,
+        MODEL_NAME,
+        EMBEDDING_DIM,
+        len(rows),
+    )
 
 
 def embed_query(text: str) -> bytes:
     """Embed a single query string and return as serialized float32 bytes.
 
     Called by the server at request time for semantic search.
+    Uses Voyage input_type=query.
     """
-    model = _get_model()
-    embedding = list(model.embed([text]))[0]
+    embedding = _embed_texts([text], input_type="query")[0]
     return np.asarray(embedding, dtype=np.float32).tobytes()
 
 
@@ -88,6 +158,30 @@ def _create_embedding_table(conn: sqlite3.Connection) -> None:
             product text partition key
         )
     """)
+
+
+def _write_embeddings_meta(conn: sqlite3.Connection) -> None:
+    """Persist light ops metadata about the last embedding build."""
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS embeddings_meta (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            model TEXT NOT NULL,
+            dimensions INTEGER NOT NULL,
+            built_at TEXT NOT NULL
+        )
+    """)
+    cur.execute(
+        """
+        INSERT INTO embeddings_meta (id, model, dimensions, built_at)
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            model = excluded.model,
+            dimensions = excluded.dimensions,
+            built_at = excluded.built_at
+        """,
+        (MODEL_NAME, EMBEDDING_DIM, datetime.now(timezone.utc).isoformat()),
+    )
 
 
 def _load_enriched_rows(conn: sqlite3.Connection) -> list[dict]:

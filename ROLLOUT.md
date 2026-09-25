@@ -1,3 +1,5 @@
+> **Superseded for embeddings:** see [VOYAGE_ROLLOUT.md](VOYAGE_ROLLOUT.md) for Plan C (Voyage AI, image `1.1.0`). This guide remains for the v1.0 API-enhancements rollout.
+
 # Rollout Guide: API Enhancements (v1.0)
 
 Deployment steps for the `feature/api-enhancements` branch changes.
