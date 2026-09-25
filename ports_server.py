@@ -1293,7 +1293,8 @@ async def semantic_search(request: SemanticSearchRequest):
             results=results[:request.limit], query=request.query
         )
 
-    except (OperationalError, ValueError):
+    except Exception:
+        # Voyage/network/API failures, sqlite-vec issues, etc. → keyword fallback
         log.exception("Vector search failed, falling back to keyword search")
         return _keyword_fallback(request)
 

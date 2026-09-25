@@ -17,12 +17,15 @@ spec:
     spec:
       containers:
       - name: ports-backend
-        image: txtxx56/ports_server:1.0
+        image: txtxx56/ports_server:1.1.0
         ports:
         - containerPort: 8001
         env:
         - name: DB_PATH
           value: "/data/allports_updated.db"
+        envFrom:
+        - secretRef:
+            name: veeam-ports-voyage
         volumeMounts:
         - name: db-storage
           mountPath: /data

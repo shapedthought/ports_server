@@ -1,0 +1,20 @@
+{
+  "description": "Realistic Veeam port NL queries for semantic-search evaluation (Plan C / Voyage).",
+  "queries": [
+    {"id": 1, "query": "ports from backup server to ESXi"},
+    {"id": 2, "query": "Veeam ONE HTTPS"},
+    {"id": 3, "query": "CDP filter"},
+    {"id": 4, "query": "WAN accelerator"},
+    {"id": 5, "query": "PostgreSQL used by VBR"},
+    {"id": 6, "query": "backup proxy to repository"},
+    {"id": 7, "query": "vCenter Server connections from backup server"},
+    {"id": 8, "query": "Linux backup agent ports"},
+    {"id": 9, "query": "Veeam Backup Enterprise Manager"},
+    {"id": 10, "query": "object storage gateway S3"},
+    {"id": 11, "query": "tape server to backup server"},
+    {"id": 12, "query": "guest interaction proxy"},
+    {"id": 13, "query": "VMware Cloud Director ports"},
+    {"id": 14, "query": "mount server NFS SMB"},
+    {"id": 15, "query": "replication job from source to target host"}
+  ]
+}
