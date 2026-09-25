@@ -199,6 +199,14 @@ def main():
         "--skip-vectors", action="store_true",
         help="Skip vector embedding generation",
     )
+    parser.add_argument(
+        "--allow-enrichment-fallback",
+        action="store_true",
+        help=(
+            "Allow continuing when Anthropic enrichment falls back for every name "
+            "(default: fail the run so a bad key cannot ship a Voyage index of stub text)"
+        ),
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -260,7 +268,11 @@ def main():
                 set(df["sourceService"].tolist() + df["targetService"].tolist()) - {""}
             )
             log.info("Enriching %d unique service names", len(unique_names))
-            enrichment = enrich_service_names(unique_names, api_key)
+            enrichment = enrich_service_names(
+                unique_names,
+                api_key,
+                fail_on_all_fallback=not args.allow_enrichment_fallback,
+            )
             write_enriched_table(conn, df, enrichment)
 
             if not args.skip_graph:

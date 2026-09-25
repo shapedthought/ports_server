@@ -24,6 +24,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # scrape_ports fails closed if Anthropic enrichment all-falls-back
+      # (bad/unscoped key). Do not add --allow-enrichment-fallback here.
       - name: Scrape, enrich, and build Voyage embeddings
         env:
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}

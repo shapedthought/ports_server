@@ -76,32 +76,69 @@ Respond with ONLY a JSON array of objects. No markdown fences, no commentary. \
 One object per input service name, in the same order as the input."""
 
 
+class EnrichmentAllFallbackError(RuntimeError):
+    """Raised when every enrichment batch fell back (bad key, API outage, etc.)."""
+
+
 def enrich_service_names(
     service_names: list[str],
     api_key: str,
     batch_size: int = DEFAULT_BATCH_SIZE,
     model: str = DEFAULT_MODEL,
+    fail_on_all_fallback: bool = True,
 ) -> dict[str, ServiceMeta]:
     """Enrich a list of unique service names via LLM.
 
     Returns a dict mapping each raw service name to its ServiceMeta.
+
+    When ``fail_on_all_fallback`` is True (default), raises
+    ``EnrichmentAllFallbackError`` if every name used the local fallback
+    path — this catches bad Anthropic keys / total API failure before we
+    build and ship Voyage embeddings over unenriched text.
     """
     client = anthropic.Anthropic(api_key=api_key)
     lookup: dict[str, ServiceMeta] = {}
 
     # Process in batches
     total = len(service_names)
+    fallback_names = 0
+    fallback_batches = 0
+    total_batches = (total + batch_size - 1) // batch_size if total else 0
     for i in range(0, total, batch_size):
         batch = service_names[i : i + batch_size]
         batch_num = i // batch_size + 1
-        total_batches = (total + batch_size - 1) // batch_size
         log.info("Enriching batch %d/%d (%d names)", batch_num, total_batches, len(batch))
 
-        results = _enrich_batch(batch, client, model)
+        results, used_fallback = _enrich_batch(batch, client, model)
+        if used_fallback:
+            fallback_batches += 1
+            fallback_names += len(batch)
         for name, meta in zip(batch, results):
             lookup[name] = meta
 
-    log.info("Enrichment complete: %d service names processed", len(lookup))
+    llm_names = total - fallback_names
+    log.info(
+        "Enrichment complete: %d service names (%d via LLM, %d via fallback; %d/%d batches fell back)",
+        total,
+        llm_names,
+        fallback_names,
+        fallback_batches,
+        total_batches,
+    )
+    if fail_on_all_fallback and total > 0 and fallback_names == total:
+        raise EnrichmentAllFallbackError(
+            f"All {total} service names used enrichment fallback "
+            f"({fallback_batches}/{total_batches} batches). "
+            "Check ANTHROPIC_API_KEY (must be workspace-scoped) and Anthropic API health. "
+            "Pass fail_on_all_fallback=False or scrape_ports.py --allow-enrichment-fallback "
+            "to force a DB build anyway."
+        )
+    if fallback_names and fallback_names < total:
+        log.warning(
+            "Partial enrichment fallback: %d/%d names used local fallback",
+            fallback_names,
+            total,
+        )
     return lookup
 
 
@@ -185,8 +222,8 @@ def _enrich_batch(
     client: anthropic.Anthropic,
     model: str = DEFAULT_MODEL,
     max_retries: int = MAX_RETRIES,
-) -> list[ServiceMeta]:
-    """Send a batch of service names to the LLM and return enriched metadata."""
+) -> tuple[list[ServiceMeta], bool]:
+    """Send a batch of service names to the LLM and return (metas, used_fallback)."""
     text = ""
     for attempt in range(max_retries + 1):
         try:
@@ -206,21 +243,21 @@ def _enrich_batch(
                     text = text[: -3].strip()
             log.debug("Raw LLM response (first 200 chars): %s", text[:200])
             parsed = json.loads(text)
-            return _validate_and_fix(parsed, batch)
+            return _validate_and_fix(parsed, batch), False
         except (json.JSONDecodeError, ValidationError, KeyError, IndexError) as e:
             log.warning("Enrichment attempt %d/%d failed: %s", attempt + 1, max_retries + 1, e)
             log.warning("Raw response (first 300 chars): %s", repr(text[:300]))
             if attempt == max_retries:
                 log.error("Enrichment failed after %d attempts, using fallback", max_retries + 1)
-                return [_fallback_meta(name) for name in batch]
+                return [_fallback_meta(name) for name in batch], True
         except anthropic.APIError as e:
             log.warning("Anthropic API error on attempt %d/%d: %s", attempt + 1, max_retries + 1, e)
             if attempt == max_retries:
                 log.error("API error persisted, using fallback for batch")
-                return [_fallback_meta(name) for name in batch]
+                return [_fallback_meta(name) for name in batch], True
             time.sleep(2**attempt)
 
-    return [_fallback_meta(name) for name in batch]
+    return [_fallback_meta(name) for name in batch], True
 
 
 def _build_user_message(batch: list[str]) -> str:

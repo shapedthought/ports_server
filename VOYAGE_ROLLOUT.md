@@ -94,6 +94,9 @@ If scrape should not run on the cluster, use the **Build embeddings DB** workflo
 
 1. Ensure repo secrets `VOYAGE_API_KEY` and `ANTHROPIC_API_KEY` are set.
 2. Run **Actions → Build embeddings DB → Run workflow** (or wait for Monday 07:00 UTC).
+   The job **fails** if Anthropic enrichment falls back for every service name
+   (e.g. wrong/unscoped `ANTHROPIC_API_KEY`), so a green run means real enrichment
+   fed the Voyage index — not stub text.
 3. Download the `allports-updated-db` artifact (`allports_updated.db`).
 4. Copy onto the PVC (example):
 
