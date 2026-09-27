@@ -14,7 +14,7 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, event, MetaData, Table, select, distinct, or_, text
+from sqlalchemy import create_engine, event, MetaData, Table, select, distinct, and_, or_, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 
@@ -46,6 +46,15 @@ from models import (
 )
 
 from synonyms import SYNONYM_INDEX as _SYNONYM_INDEX, SYNONYM_CANONICAL as _SYNONYM_CANONICAL
+from search_quality import (
+    KEYWORD_FALLBACK_COLUMNS,
+    KEYWORD_SEARCH_COLUMNS,
+    apply_candidate_boost,
+    overfetch_limit,
+    rewrite_proxy_query,
+    synonym_query_variants,
+    tokenize_query,
+)
 
 log = logging.getLogger(__name__)
 
@@ -1171,19 +1180,42 @@ def _build_app_import_server(
     )
 
 
+def _column_matches_token(table, column_names: tuple[str, ...], token: str):
+    """OR of LIKE %token% across the given columns on ``table``."""
+    pattern = f"%{token}%"
+    clauses = []
+    for name in column_names:
+        col = table.c[name]
+        clauses.append(col.like(pattern))
+    return or_(*clauses)
+
+
+def _token_and_where(table, column_names: tuple[str, ...], query: str):
+    """Match when every token of any synonym query variant hits the haystack columns.
+
+    Tokens may land in different columns (AND across tokens, OR across synonym
+    phrase variants from ROLE_SYNONYM_GROUPS).
+    """
+    plans = []
+    for variant in synonym_query_variants(query):
+        tokens = tokenize_query(variant)
+        if not tokens:
+            continue
+        plans.append(
+            and_(*[_column_matches_token(table, column_names, tok) for tok in tokens])
+        )
+    if not plans:
+        return None
+    return or_(*plans)
+
+
 @app.get("/search", response_model=List[PortResponse])
 async def search_ports(q: str):
-    pattern = f"%{q}%"
-    stmt = select(all_ports).where(
-        or_(
-            all_ports.c.sourceService.like(pattern),
-            all_ports.c.targetService.like(pattern),
-            all_ports.c.description.like(pattern),
-            all_ports.c.port.like(pattern),
-            all_ports.c.subheading.like(pattern),
-            all_ports.c.product.like(pattern),
-        )
-    )
+    """Keyword search: token-AND across fields, with host/server synonym expansion."""
+    where = _token_and_where(all_ports, KEYWORD_SEARCH_COLUMNS, q)
+    if where is None:
+        return []
+    stmt = select(all_ports).where(where)
     df = pd.read_sql(stmt, engine)
     records = df.to_dict("records")
     return [PortResponse(**record) for record in records]
@@ -1199,17 +1231,23 @@ async def search_by_port(port: str):
 
 @app.post("/semantic-search", response_model=SemanticSearchResponse)
 async def semantic_search(request: SemanticSearchRequest):
-    """Semantic search over enriched port data using vector embeddings."""
+    """Semantic search over enriched port data using vector embeddings.
+
+    Phase 2: bare proxy + VMware queries are rewritten toward "backup proxy",
+    candidates are over-fetched, mildly boosted/demoted, then truncated.
+    """
+    search_query, intent = rewrite_proxy_query(request.query)
+
     if not _vectors_available:
-        return _keyword_fallback(request)
+        return _keyword_fallback(request, search_query=search_query, intent=intent)
 
     try:
         from embedder import embed_query
 
-        query_bytes = embed_query(request.query)
+        query_bytes = embed_query(search_query)
 
-        # Over-fetch when no product filter to compensate for cross-product dedup
-        fetch_limit = request.limit if request.product else request.limit * 3
+        # Over-fetch for boost + cross-product dedup headroom
+        fetch_limit = overfetch_limit(request.limit, 3)
 
         with engine.connect() as conn:
             if request.product:
@@ -1289,35 +1327,77 @@ async def semantic_search(request: SemanticSearchRequest):
                     deduped.append(r)
             results = deduped
 
+        results = apply_candidate_boost(results, intent, request.limit)
+
         return SemanticSearchResponse(
-            results=results[:request.limit], query=request.query
+            results=results, query=request.query
         )
 
     except Exception:
         # Voyage/network/API failures, sqlite-vec issues, etc. → keyword fallback
         log.exception("Vector search failed, falling back to keyword search")
-        return _keyword_fallback(request)
+        return _keyword_fallback(request, search_query=search_query, intent=intent)
 
 
-def _keyword_fallback(request: SemanticSearchRequest) -> SemanticSearchResponse:
-    """Fall back to keyword search on enriched_ports when vectors are unavailable."""
-    pattern = f"%{request.query}%"
+def _sql_token_and_clause(
+    columns: tuple[str, ...],
+    query: str,
+    param_prefix: str = "t",
+) -> tuple[str | None, dict]:
+    """Build a SQL WHERE fragment for token-AND with synonym variants.
 
-    # Over-fetch when no product filter to compensate for cross-product dedup
-    fetch_limit = request.limit if request.product else request.limit * 3
+    Returns (clause, params) or (None, {}) when the query has no tokens.
+    """
+    plans: list[str] = []
+    params: dict = {}
+    for pi, variant in enumerate(synonym_query_variants(query)):
+        tokens = tokenize_query(variant)
+        if not tokens:
+            continue
+        token_parts = []
+        for ti, tok in enumerate(tokens):
+            key = f"{param_prefix}{pi}_{ti}"
+            params[key] = f"%{tok}%"
+            field_ors = " OR ".join(f"{col} LIKE :{key}" for col in columns)
+            token_parts.append(f"({field_ors})")
+        plans.append("(" + " AND ".join(token_parts) + ")")
+    if not plans:
+        return None, {}
+    return "(" + " OR ".join(plans) + ")", params
+
+
+def _keyword_fallback(
+    request: SemanticSearchRequest,
+    search_query: str | None = None,
+    intent: dict | None = None,
+) -> SemanticSearchResponse:
+    """Fall back to keyword search on enriched_ports when vectors are unavailable.
+
+    Uses the same token-AND + synonym expansion as GET /search. When ``intent``
+    indicates bare proxy+VMware, applies the Phase 2 candidate boost.
+    """
+    q = search_query if search_query is not None else request.query
+    if intent is None:
+        q, intent = rewrite_proxy_query(request.query)
+
+    fetch_limit = overfetch_limit(request.limit, 3)
+    clause, params = _sql_token_and_clause(KEYWORD_FALLBACK_COLUMNS, q)
+    if clause is None:
+        return SemanticSearchResponse(results=[], query=request.query, fallback=True)
+
+    params["product"] = request.product
+    params["limit"] = fetch_limit
 
     try:
         with engine.connect() as conn:
-            query = text("""
-                SELECT * FROM enriched_ports
-                WHERE (sourceService LIKE :q OR targetService LIKE :q
-                       OR description LIKE :q OR port LIKE :q
-                       OR source_canonical LIKE :q OR target_canonical LIKE :q)
-                AND (:product IS NULL OR product = :product)
-                LIMIT :limit
-            """)
             rows = conn.execute(
-                query, {"q": pattern, "product": request.product, "limit": fetch_limit}
+                text(f"""
+                    SELECT * FROM enriched_ports
+                    WHERE {clause}
+                      AND (:product IS NULL OR product = :product)
+                    LIMIT :limit
+                """),
+                params,
             ).mappings().all()
     except OperationalError:
         return SemanticSearchResponse(results=[], query=request.query, fallback=True)
@@ -1356,8 +1436,10 @@ def _keyword_fallback(request: SemanticSearchRequest) -> SemanticSearchResponse:
                 deduped.append(r)
         results = deduped
 
+    results = apply_candidate_boost(results, intent, request.limit)
+
     return SemanticSearchResponse(
-        results=results[:request.limit], query=request.query, fallback=True
+        results=results, query=request.query, fallback=True
     )
 
 

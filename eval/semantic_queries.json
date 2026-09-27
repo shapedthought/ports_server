@@ -1,5 +1,5 @@
 {
-  "description": "Realistic Veeam port NL queries for semantic-search evaluation (Plan C / Voyage).",
+  "description": "Realistic Veeam port NL queries for semantic-search evaluation (Plan C / Voyage), plus Phase 0 regression cases for proxy/VMware ranking and keyword token-AND (#33/#34).",
   "queries": [
     {"id": 1, "query": "ports from backup server to ESXi"},
     {"id": 2, "query": "Veeam ONE HTTPS"},
@@ -15,6 +15,122 @@
     {"id": 12, "query": "guest interaction proxy"},
     {"id": 13, "query": "VMware Cloud Director ports"},
     {"id": 14, "query": "mount server NFS SMB"},
-    {"id": 15, "query": "replication job from source to target host"}
+    {"id": 15, "query": "replication job from source to target host"},
+    {"id": 16, "query": "what ports does the proxy need for VMware"},
+    {"id": 17, "query": "CDP proxy ports"},
+    {"id": 18, "query": "guest interaction proxy"}
+  ],
+  "cases": [
+    {
+      "id": "proxy-vmware-nl",
+      "mode": "semantic",
+      "query": "what ports does the proxy need for VMware",
+      "product": "VBR VMware v12.3",
+      "product_aliases": ["VBR VMware v12.3", "VBR"],
+      "limit": 5,
+      "expect_top_k_any": [
+        {
+          "source_contains": "Backup proxy",
+          "target_contains": "ESXi",
+          "port_contains": "902"
+        },
+        {
+          "source_contains": "Backup proxy",
+          "target_contains": "vCenter",
+          "port_contains": "443"
+        }
+      ],
+      "notes": "Bare proxy + VMware should surface Backup proxy→ESXi 902 and/or →vCenter 443 in top 5 after Phase 2."
+    },
+    {
+      "id": "proxy-vmware-nl-unscoped",
+      "mode": "semantic",
+      "query": "what ports does the proxy need for VMware",
+      "product": null,
+      "limit": 5,
+      "expect_top_k_any": [
+        {
+          "source_contains": "Backup proxy",
+          "target_contains": "ESXi",
+          "port_contains": "902"
+        },
+        {
+          "source_contains": "Backup proxy",
+          "target_contains": "vCenter",
+          "port_contains": "443"
+        }
+      ],
+      "notes": "Unscoped variant of the failing MCP query."
+    },
+    {
+      "id": "cdp-proxy-control",
+      "mode": "semantic",
+      "query": "CDP proxy ports",
+      "product": "VBR VMware v12.3",
+      "product_aliases": ["VBR VMware v12.3", "VBR"],
+      "limit": 5,
+      "expect_top_k_any": [
+        {
+          "source_contains": "CDP proxy",
+          "target_contains": "",
+          "port_contains": ""
+        },
+        {
+          "source_contains": "",
+          "target_contains": "CDP proxy",
+          "port_contains": ""
+        }
+      ],
+      "notes": "Control: naming CDP must still return CDP proxy roles."
+    },
+    {
+      "id": "guest-interaction-control",
+      "mode": "semantic",
+      "query": "guest interaction proxy",
+      "product": "VBR VMware v12.3",
+      "product_aliases": ["VBR VMware v12.3", "VBR"],
+      "limit": 5,
+      "expect_top_k_any": [
+        {
+          "source_contains": "Guest interaction proxy",
+          "target_contains": "",
+          "port_contains": ""
+        },
+        {
+          "source_contains": "",
+          "target_contains": "Guest interaction proxy",
+          "port_contains": ""
+        }
+      ],
+      "notes": "Control: guest interaction proxy queries must still hit that role."
+    },
+    {
+      "id": "kw-backup-proxy-esxi-server",
+      "mode": "keyword",
+      "query": "Backup proxy ESXi server",
+      "expect_min_hits": 1,
+      "expect_any": [
+        {
+          "source_contains": "Backup proxy",
+          "target_contains": "ESXi",
+          "port_contains": "902"
+        }
+      ],
+      "notes": "Phase 1: token-AND across columns; contiguous LIKE previously returned 0."
+    },
+    {
+      "id": "kw-backup-proxy-esxi-host",
+      "mode": "keyword",
+      "query": "Backup proxy ESXi host",
+      "expect_min_hits": 1,
+      "expect_any": [
+        {
+          "source_contains": "Backup proxy",
+          "target_contains": "ESXi",
+          "port_contains": "902"
+        }
+      ],
+      "notes": "Phase 1: host↔server synonym via ROLE_SYNONYM_GROUPS."
+    }
   ]
 }

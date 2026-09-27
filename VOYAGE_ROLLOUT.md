@@ -85,7 +85,7 @@ curl -s -X POST https://magicports.veeambp.com/ports_server/semantic-search \
 Expect `fallback: false` and non-zero `similarity` scores. If Voyage is down or
 the key is missing, the API still returns results with `fallback: true` (keyword).
 
-Eval queries live in `eval/semantic_queries.json`.
+Eval queries live in `eval/semantic_queries.json` (see `eval/README.md`; run `python eval/run_eval.py --mode keyword` or `--mode semantic` against a live base URL).
 
 ### 7. Optional: load DB from GitHub Actions artifact
 
