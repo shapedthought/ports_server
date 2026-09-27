@@ -158,6 +158,71 @@ def test_keyword_single_token_still_works():
     assert any("902" in (r["port"] or "") for r in rows)
 
 
+def test_vmware_intent_boosts_hypervisor_targets_over_peer_data():
+    """Live failure shape: peer data ports outrank Backup proxy→ESXi/vCenter.
+
+    With backup_proxy_vmware intent, target boost (+ peer demote) must lift
+    ESXi 902 / vCenter 443 into top 5 (ideally top 2). CDP stays demoted.
+    """
+    intent = {"backup_proxy_vmware": True}
+    results = [
+        _result("Backup proxy", "Backup server", 0.90, "2500-3300"),
+        _result("Backup proxy", "Object storage", 0.88, "443"),
+        _result("CDP proxy", "ESXi server", 0.85, "902"),
+        _result("Backup proxy", "ESXi server", 0.70, "902"),
+        _result("Backup proxy", "vCenter Server", 0.68, "443"),
+        _result("Backup proxy", "Backup repository", 0.87, "2500"),
+    ]
+    top = apply_candidate_boost(results, intent, limit=5)
+    labels = [(r.sourceService, r.targetService, r.port) for r in top]
+    # ESXi and vCenter must appear in top 5
+    assert any(t == "ESXi server" and p == "902" for _, t, p in labels), labels
+    assert any(t == "vCenter Server" and p == "443" for _, t, p in labels), labels
+    # Ideally top 2 are the hypervisor edges
+    assert top[0].targetService in ("ESXi server", "vCenter Server")
+    assert top[1].targetService in ("ESXi server", "vCenter Server")
+    assert {top[0].targetService, top[1].targetService} == {
+        "ESXi server",
+        "vCenter Server",
+    }
+    # CDP still demoted out of top (or at least below Backup proxy→ESXi)
+    assert not any(r.sourceService.startswith("CDP") for r in top[:2])
+
+
+def test_vmware_intent_off_keeps_raw_similarity_order():
+    """Without intent, peer data stays above lower-sim ESXi/vCenter."""
+    intent = {"backup_proxy_vmware": False}
+    results = [
+        _result("Backup proxy", "Backup server", 0.90, "2500-3300"),
+        _result("Backup proxy", "Object storage", 0.88, "443"),
+        _result("CDP proxy", "ESXi server", 0.85, "902"),
+        _result("Backup proxy", "ESXi server", 0.70, "902"),
+        _result("Backup proxy", "vCenter Server", 0.68, "443"),
+    ]
+    top = apply_candidate_boost(results, intent, limit=5)
+    assert top[0].targetService == "Backup server"
+    assert top[1].targetService == "Object storage"
+    assert top[2].sourceService.startswith("CDP")
+    # ESXi stays lower by raw similarity
+    esxi_idx = next(i for i, r in enumerate(top) if r.targetService == "ESXi server" and r.sourceService == "Backup proxy")
+    assert esxi_idx >= 3
+
+
+def test_vmware_intent_still_demotes_cdp_and_guest():
+    """CDP/guest remain demoted when VMware intent is on (even with ESXi target)."""
+    intent = {"backup_proxy_vmware": True}
+    results = [
+        _result("CDP proxy", "ESXi server", 0.85, "902"),
+        _result("Guest interaction proxy", "vCenter Server", 0.80, "443"),
+        _result("Backup proxy", "ESXi server", 0.70, "902"),
+        _result("Backup proxy", "vCenter Server", 0.68, "443"),
+    ]
+    top = apply_candidate_boost(results, intent, limit=2)
+    assert all(r.sourceService == "Backup proxy" for r in top)
+    assert {r.port for r in top} == {"902", "443"}
+
+
+
 def test_detect_intent_helpers():
     assert detect_backup_proxy_vmware_intent("proxy for VMware")
     assert not detect_backup_proxy_vmware_intent("SureBackup proxy VMware")
