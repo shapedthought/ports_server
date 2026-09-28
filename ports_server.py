@@ -1247,7 +1247,7 @@ async def semantic_search(request: SemanticSearchRequest):
         query_bytes = embed_query(search_query)
 
         # Over-fetch for boost + cross-product dedup headroom
-        fetch_limit = overfetch_limit(request.limit, 3)
+        fetch_limit = overfetch_limit(request.limit)
 
         with engine.connect() as conn:
             if request.product:
@@ -1380,7 +1380,7 @@ def _keyword_fallback(
     if intent is None:
         q, intent = rewrite_proxy_query(request.query)
 
-    fetch_limit = overfetch_limit(request.limit, 3)
+    fetch_limit = overfetch_limit(request.limit)
     clause, params = _sql_token_and_clause(KEYWORD_FALLBACK_COLUMNS, q)
     if clause is None:
         return SemanticSearchResponse(results=[], query=request.query, fallback=True)

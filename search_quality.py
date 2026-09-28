@@ -288,6 +288,27 @@ def apply_candidate_boost(
     return list(ordered[:limit])
 
 
-def overfetch_limit(limit: int, multiplier: int = 3) -> int:
-    """Over-fetch factor for boost/dedup room (at least ``limit``)."""
-    return max(int(limit) * int(multiplier), int(limit))
+# First-stage candidate pool floor so query-aware boost can promote
+# lower-ranked targets (e.g. ESXi/vCenter) even when the user asks for limit=5.
+_OVERFETCH_FLOOR = 50
+_OVERFETCH_CAP = 200
+
+
+def overfetch_limit(
+    limit: int,
+    multiplier: int = 3,
+    *,
+    floor: int = _OVERFETCH_FLOOR,
+    cap: int = _OVERFETCH_CAP,
+) -> int:
+    """Widen the first-stage candidate pool beyond the user-visible ``limit``.
+
+    Boost/re-rank (and cross-product dedup) need a larger pool than the final
+    page size. At small limits (especially ``limit=5``), a plain
+    ``limit * multiplier`` over-fetch can leave VMware targets like ESXi 902 /
+    vCenter 443 outside the candidate set entirely. A named floor ensures those
+    rows enter the pool; an optional cap bounds cost for huge limits without
+    ever returning less than ``limit``.
+    """
+    n = max(int(limit) * int(multiplier), int(floor), int(limit))
+    return min(n, max(int(cap), int(limit)))
