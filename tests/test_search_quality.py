@@ -14,10 +14,13 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from search_quality import (  # noqa: E402
+    _OVERFETCH_CAP,
+    _OVERFETCH_FLOOR,
     apply_candidate_boost,
     build_haystack,
     detect_backup_proxy_vmware_intent,
     haystack_matches_query,
+    overfetch_limit,
     rewrite_proxy_query,
     synonym_query_variants,
     tokenize_query,
@@ -226,3 +229,31 @@ def test_vmware_intent_still_demotes_cdp_and_guest():
 def test_detect_intent_helpers():
     assert detect_backup_proxy_vmware_intent("proxy for VMware")
     assert not detect_backup_proxy_vmware_intent("SureBackup proxy VMware")
+
+def test_overfetch_limit_floor_for_small_limit():
+    """limit=5 with default multiplier 3 would be 15; floor raises to 50."""
+    assert overfetch_limit(5) == _OVERFETCH_FLOOR
+    assert overfetch_limit(5) >= 50
+
+
+def test_overfetch_limit_multiplier_when_above_floor():
+    assert overfetch_limit(20) == max(20 * 3, _OVERFETCH_FLOOR)  # 60
+
+
+def test_overfetch_limit_floor_for_limit_one():
+    assert overfetch_limit(1) == _OVERFETCH_FLOOR
+
+
+def test_overfetch_limit_never_less_than_limit():
+    assert overfetch_limit(1) >= 1
+    assert overfetch_limit(5) >= 5
+    assert overfetch_limit(20) >= 20
+    assert overfetch_limit(100) >= 100
+    # Cap must not shrink below the requested limit
+    assert overfetch_limit(250) >= 250
+
+
+def test_overfetch_limit_respects_cap():
+    # 80 * 3 = 240 would exceed cap; clamp to cap when limit <= cap
+    assert overfetch_limit(80) == _OVERFETCH_CAP
+
