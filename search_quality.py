@@ -180,9 +180,37 @@ _DEMOTED_ROLE_FRAGMENTS = (
     "virtual lab",
 )
 
+# Hypervisor / management targets for VMware-intent *target* boost.
+# Avoid bare "vmware" (appears on many non-edge rows) and bare "esx"
+# (would substring-match inside "esxi").
+_HYPERVISOR_TARGET_FRAGMENTS = (
+    "esxi",
+    "esx server",
+    "esx host",
+    "vcenter",
+    "vsphere",
+)
+
+# Same-role data-plane peers that dominate bare proxy+VMware vector hits
+# (Backup proxy↔Backup server / repository / storage / gateway on 2500–3300).
+# Demoted only under VMware intent when the row is preferred Backup proxy
+# but is *not* a hypervisor/management edge.
+_PEER_DATA_FRAGMENTS = (
+    "backup server",
+    "backup repository",
+    "repository",
+    "object storage",
+    "scale-out",
+    "gateway server",
+)
+
 # Mild deltas kept small so strong vector scores still dominate when clear.
 _BOOST_DELTA = 0.15
 _DEMOTE_DELTA = 0.12
+# Stronger than role boost so Backup proxy→ESXi/vCenter can leap peer data ports.
+_TARGET_BOOST_DELTA = 0.30
+# Mild peer demote under VMware intent only (preferred Backup proxy, not hypervisor).
+_PEER_DEMOTE_DELTA = 0.10
 
 
 def _role_blob(result: Any) -> str:
@@ -205,7 +233,16 @@ def _role_blob(result: Any) -> str:
 
 
 def boosted_sort_key(result: Any, intent: dict[str, Any] | None) -> float:
-    """Similarity plus mild boost/demote when backup-proxy VMware intent is active."""
+    """Similarity plus mild boost/demote when backup-proxy VMware intent is active.
+
+    Under ``backup_proxy_vmware`` intent:
+    - preferred Backup proxy role: +_BOOST_DELTA (unless demoted)
+    - CDP / guest / SureBackup / virtual lab: -_DEMOTE_DELTA (no target boost)
+    - hypervisor/management target (ESXi / vCenter / …): +_TARGET_BOOST_DELTA
+      when not demoted (stronger than role so proxy→ESXi/vCenter beats peers)
+    - preferred Backup proxy ↔ peer data (server/repo/storage/gateway) and
+      *not* a hypervisor edge: -_PEER_DEMOTE_DELTA
+    """
     base = float(getattr(result, "similarity", 0.0) or 0.0)
     if not intent or not intent.get("backup_proxy_vmware"):
         return base
@@ -216,11 +253,22 @@ def boosted_sort_key(result: Any, intent: dict[str, Any] | None) -> float:
     preferred = any(frag in blob for frag in _PREFERRED_ROLE_FRAGMENTS)
     # Avoid boosting CDP/guest rows that also mention "backup" elsewhere.
     demoted = any(frag in blob for frag in _DEMOTED_ROLE_FRAGMENTS)
+    hypervisor = any(frag in blob for frag in _HYPERVISOR_TARGET_FRAGMENTS)
+    peer_data = any(frag in blob for frag in _PEER_DATA_FRAGMENTS)
 
-    if preferred and not demoted:
-        score += _BOOST_DELTA
     if demoted:
         score -= _DEMOTE_DELTA
+        return score
+
+    if preferred:
+        score += _BOOST_DELTA
+        if hypervisor:
+            score += _TARGET_BOOST_DELTA
+        elif peer_data:
+            score -= _PEER_DEMOTE_DELTA
+    elif hypervisor:
+        # Either end looks like a hypervisor/management target.
+        score += _TARGET_BOOST_DELTA
     return score
 
 
